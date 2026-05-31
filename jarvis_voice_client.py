@@ -271,7 +271,11 @@ async def run_client() -> None:
                             elif t == "speaking":
                                 logger.info("🔊 Speaking...")
                             elif t == "done":
-                                logger.info("✅ Turn complete")
+                                total = data.get("total_ms", 0)
+                                stt = data.get("stt_ms", 0)
+                                llm = data.get("llm_ms", 0)
+                                tts = data.get("tts_ms", 0)
+                                logger.info(f"✅ Turn complete — STT:{stt}ms LLM:{llm}ms TTS:{tts}ms Total:{total}ms")
                             elif t == "error":
                                 logger.error("⚠ %s", data.get("text", ""))
                         elif isinstance(msg, bytes):
