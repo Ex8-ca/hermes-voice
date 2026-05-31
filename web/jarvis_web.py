@@ -344,8 +344,19 @@ async def process_audio():
     }
 
 
+@app.get("/chat")
+async def chat_get(text: str):
+    """GET endpoint for browser testing."""
+    return await _process_chat(text)
+
+
 @app.post("/chat")
-async def chat(text: str):
+async def chat_post(text: str):
+    """POST endpoint for programmatic access."""
+    return await _process_chat(text)
+
+
+async def _process_chat(text: str):
     """Process text input: Hermes LLM → TTS → return response + audio URL."""
     import time
     
