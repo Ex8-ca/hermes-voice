@@ -1,0 +1,16 @@
+[Unit]
+Description=JARVIS Voice Client
+After=network.target pipewire.service pulseaudio.service
+
+[Service]
+Type=simple
+Environment=HOME=/home/marc
+WorkingDirectory=/home/marc
+ExecStart=/home/marc/jarvis-voice-shell/venv/bin/python /home/marc/jarvis_voice_client.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

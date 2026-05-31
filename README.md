@@ -1,194 +1,143 @@
 # JARVIS Voice Shell
 
-A local-first voice shell for [Hermes Agent](https://github.com/nousresearch/hermes-agent). It keeps speech I/O in a small Python app while Hermes remains the reasoning, tools, memory, and profile layer.
+A persistent voice pipeline between a local client (`.150`) and a remote Hermes gateway (`.3`). The client captures audio, sends PCM frames over WebSocket to the gateway, receives TTS audio back, and plays it through the local speaker.
 
 > JARVIS is used here as an assistant-style project name. This project is not affiliated with Marvel, Disney, OpenAI, Microsoft, or Nous Research.
 
 ## Architecture
 
-```text
-Microphone → VAD / PTT → Whisper STT → Hermes Gateway HTTP bridge → Edge TTS → Speakers
-                                      ↘ optional OpenAI Realtime voice mode
+```
+[.150 — JARVIS Voice Client]          [.3 — JARVIS WS Gateway]
+                                      /
+Microphone (BT headset) ──► VAD ──► STT (Whisper) ──► LLM (Hermes) ──► TTS (Edge) ──► Speakers
+                                   ▲                              │
+                                   └──────────────────────────────┘
+                                     Persistent WebSocket (port 6790)
 ```
 
-The preferred path is Hermes Gateway HTTP mode:
+The gateway runs on the same machine as Hermes Agent. The client runs on a separate machine (or the same machine locally). Only the WebSocket traffic crosses the network — audio capture, VAD, TTS playback, and PipeWire/BT audio routing all stay local on the client.
 
-- `jarvis_voice_shell` handles audio, VAD/PTT, STT, TTS, turn cancellation, and speech sanitisation.
-- Hermes Gateway exposes an OpenAI-compatible local HTTP endpoint.
-- Hermes keeps the agent behaviour: tools, memory, skills, model routing, and profile config.
+## Files
 
-## Features
-
-- Typed, push-to-talk, and always-on VAD input modes
-- Local Whisper STT via `faster-whisper`
-- Edge TTS voice output, defaulting to `en-GB-RyanNeural`
-- Hermes Gateway HTTP bridge with bearer auth and SSE streaming support
-- Optional slower `hermes chat` subprocess bridge for compatibility
-- Optional OpenAI Realtime mode as an ears/mouth layer
-- Turn controller and TTS cancellation for barge-in experiments
-- Test suite covering bridge, config, audio device selection, recorder, TTS, STT, and VAD logic
-
-## Install
-
-```bash
-python -m pip install -e ".[dev,stt]"
-```
-
-For audio device access, you may also need platform-specific PortAudio/PyAudio support. The code falls back to `sounddevice` where possible.
+- `jarvis_voice_client.py` — Local client: mic capture, 44100→16kHz resampling, persistent WebSocket, TTS playback
+- `jarvis_ws_gateway.py` — Remote gateway: VAD state machine, Whisper STT, Hermes LLM, Edge TTS streaming
+- `systemd/jarvis-voice-client.service` — systemd user unit for persistent client on `.150`
 
 ## Configure
 
-Copy the example environment file and fill in only what you need:
+The client reads from `~/.env` (or environment variables):
 
 ```bash
-cp .env.example .env
+JARVIS_WS_HOST=192.168.1.3
+JARVIS_WS_PORT=6790
 ```
 
-Important variables:
+The gateway reads its API key from `~/.hermes/config.yaml` (the same key Hermes Agent uses). No separate `.env` needed for the gateway.
+
+## Quick Start
+
+### Gateway (`.3`)
 
 ```bash
-API_SERVER_KEY=your-local-gateway-key
-API_SERVER_ENABLED=true
-API_SERVER_HOST=127.0.0.1
-API_SERVER_PORT=8642
-HERMES_BRIDGE_URL=http://127.0.0.1:8642/v1/chat/completions
-BRIDGE_MAX_TOKENS=512
+# One-time: read API key from config and start the gateway
+KEY=$(python3 -c "import yaml; print(__import__('yaml').safe_load(open('~/.hermes/config.yaml'))['model']['api_key'])")
+nohup env HERMES_API_KEY="$KEY" ~/.hermes/hermes-agent/venv/bin/python /home/marc/jarvis_ws_gateway.py >> ~/.hermes/jarvis_ws_gateway.log 2>&1 &
+
+# Verify
+curl http://localhost:6790/health
 ```
 
-`API_SERVER_KEY` is required for Hermes Gateway HTTP mode. Use any private local value, but do not commit it.
+Or use the restart script:
+```bash
+/tmp/restart_gateway.sh
+```
 
-## Linux Setup
+The gateway requires:
+- Hermes Agent running on port 6789 (provides the LLM `/v1/chat/completions` endpoint)
+- Whisper STT service at `http://127.0.0.1:9001/v1/audio/transcriptions`
+- Edge TTS in the Python environment
 
-On Linux (Ubuntu/Pop!_OS tested), use the provided setup and launcher scripts:
+### Client (`.150`)
 
 ```bash
-# Install system dependencies, create venv, install Python packages
-bash setup-linux.sh
+# Create venv and install dependencies
+python -m venv ~/jarvis-voice-shell/venv
+~/jarvis-voice-shell/venv/bin/pip install sounddevice numpy websockets miniaudio
 
-# Configure
-cp .env.example .env
-# Edit .env with your Hermes API key and bridge URL
+# Copy client and configure
+cp jarvis_voice_client.py ~/
+cp systemd/jarvis-voice-client.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable jarvis-voice-client
+systemctl --user start jarvis-voice-client
 
-# Launch (always-on VAD mode)
-bash start-jarvis-linux.sh
+# Watch logs
+journalctl --user -u jarvis-voice-client -f
 ```
 
-If the wrong microphone is selected, list devices and pass an explicit index:
+Set BT headset as default audio source/sink:
 ```bash
-python -m jarvis_voice_shell.cli list-devices
-bash start-jarvis-linux.sh <device_index>
+pactl set-default-source bluez_input.41:42:FF:86:77:26
+pactl set-default-sink bluez_output.41_42_FF_86_77_26.1
+# Boost mic gain if needed (above 100% to compensate for BT headset quietness)
+pactl set-source-volume bluez_input.41:42:FF:86:77:26 200000
 ```
 
-## Remote Hermes Gateway
+## Audio Pipeline
 
-JARVIS can talk to a Hermes Agent running on a different machine. Set `HERMES_BRIDGE_URL` in `.env` to point at the remote endpoint:
+| Stage | Location | Details |
+|---|---|---|
+| Mic capture | `.150` | sounddevice, PipeWire default (device 19), 44100Hz float32 |
+| Resampling | `.150` | 44100 → 16000 Hz via numpy.interp, 2016 bytes/frame |
+| VAD | `.3` | Energy-based VAD, threshold=20, pre_roll=3, end_silence=5 |
+| STT | `.3` | faster-whisper at `localhost:9001`, model: tiny |
+| LLM | `.3` | Hermes Gateway at `localhost:6789/v1/chat/completions`, Bearer auth |
+| TTS | `.3` | Edge TTS, voice: en-GB-RyanNeural |
+| Playback | `.150` | miniaudio MP3 decode → sounddevice OutputStream, 16kHz s16le |
 
-```bash
-HERMES_BRIDGE_URL=http://192.168.1.3:6789/v1/chat/completions
-API_SERVER_KEY=your-gateway-key
-```
+VAD state machine: `idle → (loud frame) → speaking → (5 quiet frames) → segment → STT`
 
-All audio processing (VAD, Whisper STT, Edge TTS, playback) remains local — only the LLM call goes over the network.
+## No Wake Word
 
-## Start Hermes Gateway
+The client listens continuously — there is no wake word. VAD triggers on any sufficiently loud audio (RMS ≥ 20 at 16kHz). To add a wake word (e.g. "Hey Jarvis"), a Porcupine/Rhino module would need to be inserted between mic capture and the WebSocket send loop.
 
-In one terminal:
-
-```bash
-API_SERVER_ENABLED=true \
-API_SERVER_KEY="$API_SERVER_KEY" \
-API_SERVER_HOST=127.0.0.1 \
-API_SERVER_PORT=8642 \
-hermes gateway run --replace
-```
-
-Check it:
-
-```bash
-curl -sf http://127.0.0.1:8642/health
-curl -sf -H "Authorization: Bearer ${API_SERVER_KEY}" http://127.0.0.1:8642/v1/models
-```
-
-## Run
-
-Typed mode:
+## Troubleshooting
 
 ```bash
-python -m jarvis_voice_shell.cli run --input-mode typed --brain http
+# Check client is running
+systemctl --user status jarvis-voice-client
+
+# Check gateway is running
+curl http://192.168.1.3:6790/health
+
+# Restart client
+systemctl --user restart jarvis-voice-client
+
+# Restart gateway
+/tmp/restart_gateway.sh
+
+# Watch client logs
+journalctl --user -u jarvis-voice-client -f
+
+# Watch gateway logs
+tail -f ~/.hermes/jarvis_ws_gateway.log
+
+# Check BT headset volume (should be 200000+ for reliable VAD)
+pactl list sources | grep -A5 bluez_input.41:42:FF:86:77:26
+
+# List audio devices
+python3 -c "import sounddevice as sd; [print(i, d['name'], 'in=', d['max_input_channels']) for i, d in enumerate(sd.query_devices())]"
 ```
 
-Push-to-talk mode:
+## Security
 
-```bash
-python -m jarvis_voice_shell.cli run --input-mode ptt --brain http --stt-engine whisper --stt-model tiny
-```
+- The client `.env` contains `JARVIS_WS_HOST` — do not commit it
+- The gateway reads its LLM API key from `~/.hermes/config.yaml` — not passed as a file in this repo
+- The `.git-credentials` file contains a GitHub PAT — never commit it
 
-Always-on VAD mode:
+## Known Limitations
 
-```bash
-python -m jarvis_voice_shell.cli run \
-  --input-mode always-on \
-  --brain http \
-  --sample-rate 16000 \
-  --tts-rate +10% \
-  --stt-engine whisper \
-  --stt-model tiny \
-  --max-record-seconds 8 \
-  --vad-threshold 300 \
-  --vad-end-silence-ms 700
-```
-
-If device auto-detection selects the wrong microphone or speaker, first inspect devices using Python:
-
-```bash
-python - <<'PY'
-import sounddevice as sd
-for i, d in enumerate(sd.query_devices()):
-    print(i, d['name'], 'in=', d['max_input_channels'], 'out=', d['max_output_channels'], 'sr=', d['default_samplerate'])
-PY
-```
-
-Then pass `--input-device <index>` and/or `--output-device <index>`.
-
-## Windows launchers
-
-The included `.bat` files are public-safe examples. They use the script directory rather than a hardcoded user path and require `API_SERVER_KEY` to be set before running Gateway mode.
-
-If your Git Bash path differs from `C:\Program Files\Git\bin\bash.exe`, edit the launcher locally. Do not commit personal paths or device indices.
-
-## Development
-
-```bash
-python -m pytest
-python -m ruff check .
-```
-
-Current expected test command:
-
-```bash
-python -m pytest
-```
-
-## Security / public sharing notes
-
-This repository intentionally excludes:
-
-- `.env` and other secret files
-- audio recordings and generated TTS files
-- cache directories and bytecode
-- local Hermes runtime state
-- personal Windows paths and machine-specific audio device IDs
-
-Before publishing, run:
-
-```bash
-python -m pytest
-python scripts/public_safety_scan.py
-```
-
-## Known limitations
-
-- Edge TTS uses a network service.
-- Always-on VAD thresholds are microphone-dependent.
-- True full-duplex voice remains experimental; chunked/streaming TTS is the next major latency improvement.
-- Hermes Gateway must be running for `--brain http` mode.
+- BT headset mic (YYK-Q16) uses mSBC SCO codec which is low fidelity — transcription quality is lower than a wired headset or built-in mic
+- `bluez5.loopback=true` in PipeWire for the BT source routes mic back to speaker — this is normal for headsets but limits recording quality
+- No wake word — always-on VAD listens from the moment the client starts
+- Gateway restart script is a temporary workaround — the gateway should eventually run as a systemd service on `.3`
