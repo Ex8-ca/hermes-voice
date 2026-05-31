@@ -20,7 +20,7 @@ app = FastAPI(title="JARVIS Voice Web")
 # Hermes gateway config
 HERMES_URL = "http://192.168.1.3:6789/v1/chat/completions"
 HERMES_API_KEY = "chillygeek6789"
-HERMES_MODEL = "hermes-agent"
+HERMES_MODEL = "deepseek-chat"
 
 # TTS cache directory
 CACHE_DIR = Path.home() / ".cache" / "jarvis-voice-shell" / "tts_cache"
