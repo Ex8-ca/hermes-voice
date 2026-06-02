@@ -7,6 +7,7 @@ Real-time voice pipeline for AI assistants. Streaming STT, streaming LLM, stream
 ## Highlights
 
 - **Always-on VAD** — energy-based voice activity detection, ~315ms end-silence for natural turn-taking
+- **Barge-in** — interrupt the AI mid-response by speaking over it (sidetone cancellation removes the AI's own audio)
 - **Streaming LLM** — Groq (~150ms first token), DeepSeek, OpenAI, or local (Ollama/vLLM)
 - **Filler phrases** — "One sec..." or "Checking..." plays immediately to mask LLM latency
 - **TTS streaming** — Edge TTS audio chunks stream to the client as they synthesize
@@ -96,12 +97,20 @@ pip install -r requirements-client.txt
 
 # Point at the server
 export JARVIS_WS_HOST=192.168.1.50
-export JARVIS_WS_PORT=6790
+export JARVIS_WS_PORT=8989
 
 python jarvis_voice_client.py
 ```
 
 Or run as a systemd service (Linux) — see `systemd/jarvis-voice-client.service` for an example.
+
+**Barge-in (interrupting the AI):** when the AI is speaking and you start talking, the client
+performs sidetone cancellation (subtracts the AI's TTS audio from the mic input) and detects your
+voice. It sends a `barge_in` message to the gateway which cancels the in-flight LLM/TTS task.
+
+Tune via env vars (see `.env.example`):
+- `JARVIS_SIDETONE_DELAY_MS` — alignment between TTS output and mic input (default 80ms)
+- `JARVIS_BARGE_IN_RMS` — minimum voice energy to interrupt (default 800)
 
 ## LLM provider priority
 
