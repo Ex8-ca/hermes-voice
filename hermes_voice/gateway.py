@@ -25,15 +25,14 @@ if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
 
 from vad import EnergyVAD, VADState, rms_int16  # noqa: E402
-from llm import pick_llm, stream_chat  # noqa: E402
 from persona import _load_voice_prompt  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("hermes-voice.gateway")
-app = FastAPI(title="JARVIS Voice Web")
 
-# Load .env from plugin parent (so users can keep their repo-root .env) or
-# from the plugin's own directory.
+# Load .env BEFORE importing llm — llm.py captures env vars at module-load
+# time, so the .env has to be in os.environ by then. We use override=False
+# so existing process env (from systemd, shell export, etc.) takes priority.
 try:
     from dotenv import load_dotenv
     for _env_candidate in [
@@ -42,16 +41,172 @@ try:
         Path.home() / ".hermes" / "hermes-voice.env",     # user-level .env
     ]:
         if _env_candidate.exists():
-            load_dotenv(_env_candidate)
+            load_dotenv(_env_candidate, override=False)
             logger.info(f"Loaded env from {_env_candidate}")
             break
 except ImportError:
     pass
 
+from llm import pick_llm, stream_chat  # noqa: E402
+from hermes_voice import tools as _tools_pkg  # noqa: E402  (triggers tool self-registration)
+from hermes_voice.tools import REGISTRY as TOOL_REGISTRY  # noqa: E402
+from hermes_voice.tools import dispatch as dispatch_tool  # noqa: E402
+from hermes_voice.tools import pick_filler  # noqa: E402
+from hermes_voice.tools import parse_tool_call, strip_tool_call  # noqa: E402
+
+app = FastAPI(title="JARVIS Voice Web")
+
 
 # Voice system prompt is loaded by the `persona` module (see persona.py).
 # Resolution order: HERMES_VOICE_PROMPT_FILE → ~/.hermes/VOICE.md → ~/.hermes/SOUL.md
 # → ~/.hermes/USER.md (optional) → generic JARVIS persona.
+
+
+def _build_tool_list_section() -> str:
+    """Render the available tools for the LLM's system prompt.
+
+    Only emitted if at least one tool is registered. The LLM is told
+    the text-based [[TOOL:...]] syntax, the tool priority order, and
+    the available tools with their arguments.
+    """
+    tools = TOOL_REGISTRY.list()
+    if not tools:
+        return ""
+
+    lines = [
+        "",
+        "## Tools",
+        "",
+        "You have access to the following tools. To call one, output exactly:",
+        "",
+        "    [[TOOL:tool_name arg1=value1 arg2=value2]]",
+        "",
+        "Then stop and wait for the result. The system will run the tool and",
+        "feed the result back to you as your next turn. Do not write any other",
+        "text in the turn that contains a tool call.",
+        "",
+        "Tool priority (highest first): the system tries the first tool; if it",
+        "returns nothing useful, it falls through to the next.",
+        "",
+    ]
+    for t in tools:
+        lines.append(f"### {t.name} (priority {t.priority})")
+        lines.append(t.description)
+        if t.examples:
+            lines.append(f"Example: {t.examples[0]}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+async def _run_tool_loop(
+    response_text: str,
+    messages: list,
+    max_tok: int,
+    *,
+    on_token=None,
+    filler_tts_to_ws=None,
+    max_rounds: int = 3,
+) -> str:
+    """Run the LLM's tool-call loop until we get a final answer.
+
+    The LLM may emit [[TOOL:...]] syntax. For each tool call:
+    1. Pick a filler phrase and (optionally) TTS it to the WebSocket
+    2. Dispatch the tool (with priority fallback)
+    3. Feed the result back to the LLM as a follow-up turn
+    4. Stream the LLM's follow-up response via `on_token` (if provided)
+
+    Returns the cleaned, final response text (with all tool calls stripped).
+    Loops at most `max_rounds` times to prevent infinite tool-call chains.
+
+    Args:
+        response_text: The LLM's first-turn response (may contain a tool call)
+        messages: The original messages array (system + user). Follow-up
+            turns are appended to this for context.
+        max_tok: max_tokens for the follow-up LLM call.
+        on_token: Optional async callback(str) called for each streamed token
+            of the follow-up response. If None, the response is collected
+            silently (used by the chat HTTP endpoint).
+        filler_tts_to_ws: Optional WebSocket to send `filler` JSON events
+            and filler-phrase MP3 bytes to. If None, no filler TTS is
+            generated (chat endpoint).
+    """
+    import time
+
+    for tool_round in range(max_rounds):
+        parsed = parse_tool_call(response_text)
+        if not parsed:
+            return response_text
+
+        tool_name, tool_kwargs = parsed
+        logger.info(f"Tool call (round {tool_round + 1}): {tool_name}({tool_kwargs})")
+
+        # Send filler phrase to TTS immediately (masks tool latency)
+        filler = pick_filler()
+        if filler_tts_to_ws is not None:
+            try:
+                await filler_tts_to_ws.send_json({"type": "filler", "text": filler})
+            except Exception:
+                pass
+            try:
+                import edge_tts
+                communicate = edge_tts.Communicate(
+                    text=filler, voice="en-GB-RyanNeural", rate="+0%"
+                )
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        await filler_tts_to_ws.send_bytes(chunk["data"])
+            except Exception as e:
+                logger.debug(f"Filler TTS failed (non-fatal): {e}")
+
+        # Run the tool
+        tool_start = time.perf_counter()
+        tool_result = await dispatch_tool(tool_name, tool_kwargs, fallback=True, timeout_s=15.0)
+        tool_ms = (time.perf_counter() - tool_start) * 1000
+        logger.info(
+            f"Tool '{tool_result.source or tool_name}' done in {tool_ms:.0f}ms: "
+            f"{len(tool_result.text)} chars"
+        )
+
+        # If the tool produced nothing useful (and we have no more fallbacks
+        # in the chain), just use the LLM's surrounding text and skip the
+        # follow-up turn.
+        surrounding_text = strip_tool_call(response_text).strip()
+        if tool_result.is_empty() and not surrounding_text:
+            tool_result_text = (
+                f"[Tool {tool_name} returned no results. "
+                "Answer from your own knowledge, briefly.]"
+            )
+        elif tool_result.is_empty():
+            response_text = surrounding_text
+            return response_text
+        else:
+            tool_result_text = tool_result.text
+
+        # Feed the tool result back to the LLM as a follow-up turn
+        try:
+            follow_messages = messages + [
+                {"role": "assistant", "content": response_text},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Tool result for {tool_name}:\n{tool_result_text}\n\n"
+                        "Now answer the original question briefly."
+                    ),
+                },
+            ]
+            response_text = ""
+            async for content in stream_chat(follow_messages, max_tokens=max_tok):
+                if not content:
+                    continue
+                response_text += content
+                if on_token is not None:
+                    await on_token(content)
+        except Exception:
+            logger.exception("Follow-up LLM call failed")
+            return surrounding_text or "I ran into a problem while looking that up."
+
+    return response_text
 
 # Local Whisper STT server
 WHISPER_URL = os.getenv("WHISPER_URL", "http://127.0.0.1:9001/v1/audio/transcriptions")
@@ -341,7 +496,9 @@ async def voice_websocket(ws: WebSocket):
 
         # ── Step 2: Streaming LLM (multi-provider) ─────────────────
         llm_start = time.perf_counter()
-        system_prompt = _load_voice_prompt()
+        base_prompt = _load_voice_prompt()
+        tool_section = _build_tool_list_section()
+        system_prompt = base_prompt + tool_section
         picked = pick_llm()
         if not picked[0]:
             await ws.send_json({"type": "error", "text": "No LLM configured. Set GROQ_API_KEY, DEEPSEEK_API_KEY, OPENAI_API_KEY, or LOCAL_LLM_URL in .env"})
@@ -376,6 +533,25 @@ async def voice_websocket(ws: WebSocket):
             return
 
         await ws.send_json({"type": "response_complete", "text": full_response, "llm_ms": llm_ms})
+
+        # ── Step 2.5: Tool dispatch (if LLM requested a tool) ─────
+        # The LLM may have emitted [[TOOL:...]] syntax. If so, the shared
+        # _run_tool_loop helper handles dispatch, filler TTS, and follow-up
+        # LLM calls. The helper takes an `on_token` callback so we can
+        # stream the follow-up response back to the WebSocket.
+        async def _ws_on_token(tok: str) -> None:
+            try:
+                await ws.send_json({"type": "token", "text": tok})
+            except Exception:
+                pass
+
+        full_response = await _run_tool_loop(
+            full_response,
+            messages,
+            max_tok,
+            on_token=_ws_on_token,
+            filler_tts_to_ws=ws,
+        )
 
         # ── Step 3: TTS streaming ─────────────────────────────────
         await ws.send_json({"type": "speaking"})
@@ -437,7 +613,9 @@ async def _process_chat(text: str):
 
     # Step 1: Call LLM (multi-provider via llm.pick_llm / llm.stream_chat)
     bridge_start = time.perf_counter()
-    system_prompt = _load_voice_prompt()
+    base_prompt = _load_voice_prompt()
+    tool_section = _build_tool_list_section()
+    system_prompt = base_prompt + tool_section
 
     picked = pick_llm()
     if not picked[0]:
@@ -453,6 +631,10 @@ async def _process_chat(text: str):
     async for token in stream_chat(messages, max_tokens=max_tok):
         response_text += token
     bridge_ms = (time.perf_counter() - bridge_start) * 1000
+
+    # Step 1.5: Tool dispatch (chat endpoint) — silently runs tools and feeds
+    # the result back to the LLM. The final response_text has the cleaned answer.
+    response_text = await _run_tool_loop(response_text, messages, max_tok)
 
     # Step 2: Generate TTS using edge-tts
     tts_start = time.perf_counter()
