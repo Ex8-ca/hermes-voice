@@ -1,0 +1,51 @@
+# JARVIS Voice Shell — Docker Compose
+# Brings up: web UI (port 8989) + whisper server (port 9001)
+# Choose CPU or GPU variant with --build-arg TARGET=cpu|gpu
+
+services:
+  whisper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ${TARGET:-cpu}    # cpu (default) or gpu
+    image: jarvis-whisper:latest
+    container_name: jarvis-whisper
+    command: ["python", "whisper-server/server.py"]
+    ports:
+      - "9001:9001"
+    volumes:
+      - whisper-models:/root/.cache/huggingface
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-turbo}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float32}
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: base
+    image: jarvis-web:latest
+    container_name: jarvis-web
+    command: ["uvicorn", "web.jarvis_web:app", "--host", "0.0.0.0", "--port", "8989"]
+    ports:
+      - "8989:8989"
+    volumes:
+      - tts-cache:/root/.cache/jarvis-voice-shell/tts_cache
+    env_file: .env
+    environment:
+      - WHISPER_URL=http://whisper:9001/v1/audio/transcriptions
+    depends_on:
+      - whisper
+    restart: unless-stopped
+
+volumes:
+  whisper-models:
+  tts-cache:

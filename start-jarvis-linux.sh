@@ -35,7 +35,7 @@ fi
 echo "┌─────────────────────────────────────────────────────────┐"
 echo "│ JARVIS Voice Shell — Always-On VAD Mode                  │"
 echo "├─────────────────────────────────────────────────────────┤"
-echo "│ Bridge: ${HERMES_BRIDGE_URL:-http://192.168.1.3:6789/v1/chat/completions}"
+echo "│ Bridge: ${HERMES_BRIDGE_URL:-http://127.0.0.1:6789/v1/chat/completions}"
 echo "│ TTS:    ${JARVIS_TTS_VOICE:-en-GB-RyanNeural}"
 echo "│ STT:    whisper tiny"
 echo "└─────────────────────────────────────────────────────────┘"

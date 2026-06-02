@@ -1,143 +1,178 @@
 # JARVIS Voice Shell
 
-A persistent voice pipeline between a local client (`.150`) and a remote Hermes gateway (`.3`). The client captures audio, sends PCM frames over WebSocket to the gateway, receives TTS audio back, and plays it through the local speaker.
+Real-time voice pipeline for AI assistants. Streaming STT, streaming LLM, streaming TTS, with filler phrases that mask latency. Works in two modes: single-machine (mic + STT + LLM + TTS on one box) and split (mic on one machine, STT/LLM/TTS on another).
 
 > JARVIS is used here as an assistant-style project name. This project is not affiliated with Marvel, Disney, OpenAI, Microsoft, or Nous Research.
 
-## Architecture
+## Highlights
+
+- **Always-on VAD** — energy-based voice activity detection, ~315ms end-silence for natural turn-taking
+- **Streaming LLM** — Groq (~150ms first token), DeepSeek, OpenAI, or local (Ollama/vLLM)
+- **Filler phrases** — "One sec..." or "Checking..." plays immediately to mask LLM latency
+- **TTS streaming** — Edge TTS audio chunks stream to the client as they synthesize
+- **Two deployment modes** — single-machine (web UI) or split (Python client → gateway)
+- **Multi-provider** — auto-pick first available LLM from `.env`
+- **Docker** — one-command deployment with GPU support
+
+## Two modes
+
+### Single-machine (most users)
+
+Mic, STT, LLM, TTS all on one computer. Just open the web UI.
 
 ```
-[.150 — JARVIS Voice Client]          [.3 — JARVIS WS Gateway]
-                                      /
-Microphone (BT headset) ──► VAD ──► STT (Whisper) ──► LLM (Hermes) ──► TTS (Edge) ──► Speakers
-                                   ▲                              │
-                                   └──────────────────────────────┘
-                                     Persistent WebSocket (port 6790)
+Microphone → Browser → Web UI (port 8989) → Whisper (port 9001) → LLM (Groq/DeepSeek) → TTS → Speakers
 ```
 
-The gateway runs on the same machine as Hermes Agent. The client runs on a separate machine (or the same machine locally). Only the WebSocket traffic crosses the network — audio capture, VAD, TTS playback, and PipeWire/BT audio routing all stay local on the client.
+### Split architecture (mic on one box, server on another)
+
+Useful when you want the mic near you but heavy compute (Whisper, LLM) on a server.
+
+```
+Client machine                           Server machine
+─────────────                            ──────────────
+Microphone → Python client ──WS─►  JARVIS Gateway ──► Whisper ──► LLM ──► TTS ──► WebSocket
+                ▲                                              │
+                └────────── TTS audio back ─────────────────────┘
+Speakers
+```
+
+## Quickstart (single-machine, Docker)
+
+```bash
+git clone https://github.com/Ex8-ca/jarvis-voice-shell.git
+cd jarvis-voice-shell
+
+cp .env.example .env
+# Edit .env and set GROQ_API_KEY=*** (or DEEPSEEK_API_KEY / OPENAI_API_KEY)
+
+docker compose up -d
+open http://localhost:8989
+```
+
+For GPU acceleration: `docker compose build --build-arg TARGET=gpu` (requires `nvidia-container-toolkit`).
+
+## Quickstart (single-machine, manual)
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements-web.txt
+pip install -r requirements-whisper.txt
+
+cp .env.example .env
+# Edit .env with your LLM key
+
+# Terminal 1: Whisper STT
+python whisper-server/server.py &
+
+# Terminal 2: Web UI
+uvicorn web.jarvis_web:app --host 0.0.0.0 --port 8989
+
+open http://localhost:8989
+```
+
+## Quickstart (split architecture)
+
+### On the server (where Whisper + LLM + TTS run)
+
+```bash
+pip install -r requirements-web.txt -r requirements-whisper.txt
+cp .env.example .env
+# Set your LLM key
+
+python whisper-server/server.py &
+uvicorn web.jarvis_web:app --host 0.0.0.0 --port 8989
+```
+
+The web UI on port 8989 hosts the gateway WebSocket. Clients connect to it.
+
+### On the client machine (where the mic is)
+
+```bash
+git clone https://github.com/Ex8-ca/jarvis-voice-shell.git
+cd jarvis-voice-shell
+pip install -r requirements-client.txt
+
+# Point at the server
+export JARVIS_WS_HOST=192.168.1.50
+export JARVIS_WS_PORT=6790
+
+python jarvis_voice_client.py
+```
+
+Or run as a systemd service (Linux) — see `systemd/jarvis-voice-client.service` for an example.
+
+## LLM provider priority
+
+The gateway picks the first LLM with a key set in `.env`:
+
+1. **Groq** (`GROQ_API_KEY=***`) — fastest, free tier, ~150ms first token
+2. **DeepSeek** (`DEEPSEEK_API_KEY=***`) — high quality, ~500ms first token
+3. **OpenAI** (`OPENAI_API_KEY=***`) — reliable, expensive
+4. **Local** (`LOCAL_LLM_URL=http://...`) — Ollama/vLLM/LM Studio, $0
+5. **Hermes** (`HERMES_URL=http://...`) — any OpenAI-compatible proxy
+
+For most users, Groq with `llama-3.1-8b-instant` is the sweet spot. Free, fast, good enough for voice.
+
+## Latency budget
+
+Typical end-to-end (you-stop-talking → first response audio byte):
+
+| Component | Time |
+|-----------|------|
+| VAD end-silence | 315ms |
+| Whisper STT | ~400ms |
+| Filler phrase playback | ~600ms (overlaps with LLM) |
+| LLM first token (Groq) | ~150ms |
+| LLM full response | ~800ms |
+| TTS first chunk | ~400ms |
+| **Perceived latency** | **~1.0s** (filler masks LLM) |
+
+## Configuration
+
+See `.env.example` for the full list. Most important:
+
+```bash
+# LLM (one of these)
+GROQ_API_KEY=***
+
+# Voice persona (optional)
+# JARVIS_SYSTEM_PROMPT_FILE=/path/to/your/voice-prompt.txt
+
+# Filler phrases (set empty to disable)
+JARVIS_FILLER_PHRASES=One sec...,Checking...,On it...
+
+# Whisper model: "turbo" (default) or "Systran/faster-distil-whisper-large-v3" (faster)
+WHISPER_MODEL=turbo
+```
 
 ## Files
 
-- `jarvis_voice_client.py` — Local client: mic capture, 44100→16kHz resampling, persistent WebSocket, TTS playback
-- `jarvis_ws_gateway.py` — Remote gateway: VAD state machine, Whisper STT, Hermes LLM, Edge TTS streaming
-- `systemd/jarvis-voice-client.service` — systemd user unit for persistent client on `.150`
+- `web/jarvis_web.py` — FastAPI web UI (single-machine mode) and gateway (split mode)
+- `jarvis_voice_client.py` — Python client for split-architecture mode
+- `whisper-server/server.py` — Faster-Whisper STT server
+- `Dockerfile` + `docker-compose.yml` — Production deployment
+- `systemd/jarvis-voice-client.service` — Example systemd unit for the client
 
-## Configure
+## CLI mode (push-to-talk)
 
-The client reads from `~/.env` (or environment variables):
-
-```bash
-JARVIS_WS_HOST=192.168.1.3
-JARVIS_WS_PORT=6790
-```
-
-The gateway reads its API key from `~/.hermes/config.yaml` (the same key Hermes Agent uses). No separate `.env` needed for the gateway.
-
-## Quick Start
-
-### Gateway (`.3`)
+For terminal-based push-to-talk:
 
 ```bash
-# One-time: read API key from config and start the gateway
-KEY=$(python3 -c "import yaml; print(__import__('yaml').safe_load(open('~/.hermes/config.yaml'))['model']['api_key'])")
-nohup env HERMES_API_KEY="$KEY" ~/.hermes/hermes-agent/venv/bin/python /home/marc/jarvis_ws_gateway.py >> ~/.hermes/jarvis_ws_gateway.log 2>&1 &
-
-# Verify
-curl http://localhost:6790/health
+pip install -e .
+jarvis-voice run --input-mode ptt --brain http
 ```
 
-Or use the restart script:
-```bash
-/tmp/restart_gateway.sh
-```
+See `python -m jarvis_voice_shell.cli --help` for all options.
 
-The gateway requires:
-- Hermes Agent running on port 6789 (provides the LLM `/v1/chat/completions` endpoint)
-- Whisper STT service at `http://127.0.0.1:9001/v1/audio/transcriptions`
-- Edge TTS in the Python environment
-
-### Client (`.150`)
+## Development
 
 ```bash
-# Create venv and install dependencies
-python -m venv ~/jarvis-voice-shell/venv
-~/jarvis-voice-shell/venv/bin/pip install sounddevice numpy websockets miniaudio
-
-# Copy client and configure
-cp jarvis_voice_client.py ~/
-cp systemd/jarvis-voice-client.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable jarvis-voice-client
-systemctl --user start jarvis-voice-client
-
-# Watch logs
-journalctl --user -u jarvis-voice-client -f
+python -m pytest
+python -m ruff check .
 ```
 
-Set BT headset as default audio source/sink:
-```bash
-pactl set-default-source bluez_input.41:42:FF:86:77:26
-pactl set-default-sink bluez_output.41_42_FF_86_77_26.1
-# Boost mic gain if needed (above 100% to compensate for BT headset quietness)
-pactl set-source-volume bluez_input.41:42:FF:86:77:26 200000
-```
+## License
 
-## Audio Pipeline
-
-| Stage | Location | Details |
-|---|---|---|
-| Mic capture | `.150` | sounddevice, PipeWire default (device 19), 44100Hz float32 |
-| Resampling | `.150` | 44100 → 16000 Hz via numpy.interp, 2016 bytes/frame |
-| VAD | `.3` | Energy-based VAD, threshold=20, pre_roll=3, end_silence=5 |
-| STT | `.3` | faster-whisper at `localhost:9001`, model: tiny |
-| LLM | `.3` | Hermes Gateway at `localhost:6789/v1/chat/completions`, Bearer auth |
-| TTS | `.3` | Edge TTS, voice: en-GB-RyanNeural |
-| Playback | `.150` | miniaudio MP3 decode → sounddevice OutputStream, 16kHz s16le |
-
-VAD state machine: `idle → (loud frame) → speaking → (5 quiet frames) → segment → STT`
-
-## No Wake Word
-
-The client listens continuously — there is no wake word. VAD triggers on any sufficiently loud audio (RMS ≥ 20 at 16kHz). To add a wake word (e.g. "Hey Jarvis"), a Porcupine/Rhino module would need to be inserted between mic capture and the WebSocket send loop.
-
-## Troubleshooting
-
-```bash
-# Check client is running
-systemctl --user status jarvis-voice-client
-
-# Check gateway is running
-curl http://192.168.1.3:6790/health
-
-# Restart client
-systemctl --user restart jarvis-voice-client
-
-# Restart gateway
-/tmp/restart_gateway.sh
-
-# Watch client logs
-journalctl --user -u jarvis-voice-client -f
-
-# Watch gateway logs
-tail -f ~/.hermes/jarvis_ws_gateway.log
-
-# Check BT headset volume (should be 200000+ for reliable VAD)
-pactl list sources | grep -A5 bluez_input.41:42:FF:86:77:26
-
-# List audio devices
-python3 -c "import sounddevice as sd; [print(i, d['name'], 'in=', d['max_input_channels']) for i, d in enumerate(sd.query_devices())]"
-```
-
-## Security
-
-- The client `.env` contains `JARVIS_WS_HOST` — do not commit it
-- The gateway reads its LLM API key from `~/.hermes/config.yaml` — not passed as a file in this repo
-- The `.git-credentials` file contains a GitHub PAT — never commit it
-
-## Known Limitations
-
-- BT headset mic (YYK-Q16) uses mSBC SCO codec which is low fidelity — transcription quality is lower than a wired headset or built-in mic
-- `bluez5.loopback=true` in PipeWire for the BT source routes mic back to speaker — this is normal for headsets but limits recording quality
-- No wake word — always-on VAD listens from the moment the client starts
-- Gateway restart script is a temporary workaround — the gateway should eventually run as a systemd service on `.3`
+MIT

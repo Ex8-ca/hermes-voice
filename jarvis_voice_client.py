@@ -1,12 +1,20 @@
 """
-JARVIS Voice Client — connects to jarvis_ws_gateway.py on .3
+JARVIS Voice Client — Python client for the JARVIS WebSocket gateway.
 
-- Captures mic from default PipeWire source (Bluetooth headset YYK-Q16)
-- Sends PCM frames over WebSocket to .3:6790
-- Receives TTS MP3 chunks and plays through default PipeWire sink (Bluetooth headset)
+- Captures mic from default audio device
+- Sends PCM frames over WebSocket to the JARVIS gateway
+- Receives TTS MP3 chunks and plays through default audio device
+
+Use this for split-architecture deployments: mic on one machine, the
+JARVIS gateway (which runs Whisper STT, LLM, and TTS) on another.
+
+For single-machine deployments, use the web UI at web/jarvis_web.py instead.
 
 Usage:
-    python3 jarvis_voice_client.py [--host 192.168.1.3] [--port 6790]
+    python3 jarvis_voice_client.py [--host <gateway-host>] [--port <gateway-port>]
+
+Or via environment:
+    JARVIS_WS_HOST=192.168.1.50 JARVIS_WS_PORT=6790 python3 jarvis_voice_client.py
 
 Dependencies (in venv):
     sounddevice, numpy, websockets, miniaudio
@@ -37,7 +45,8 @@ logger = logging.getLogger("jarvis-voice-client")
 
 # ── Config ────────────────────────────────────────────────────────────
 
-WS_HOST = os.environ.get("JARVIS_WS_HOST", "192.168.1.3")
+# Defaults to localhost — set JARVIS_WS_HOST to your gateway's IP for split setups
+WS_HOST = os.environ.get("JARVIS_WS_HOST", "127.0.0.1")
 WS_PORT = int(os.environ.get("JARVIS_WS_PORT", "6790"))
 WS_URL = f"ws://{WS_HOST}:{WS_PORT}/ws"
 

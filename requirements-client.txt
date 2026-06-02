@@ -1,0 +1,6 @@
+# Dependencies for the Python voice client (split-architecture mode)
+# Install: pip install -r requirements-client.txt
+sounddevice>=0.4.6
+numpy>=2.0
+websockets>=12.0
+miniaudio>=1.51

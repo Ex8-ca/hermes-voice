@@ -139,37 +139,85 @@ except ImportError:
     pass
 
 # Hermes gateway config (for full-context requests)
-HERMES_URL = "http://192.168.1.3:6789/v1/chat/completions"
-HERMES_API_KEY = "chillygeek6789"
-HERMES_MODEL = "deepseek-chat"
+HERMES_URL = os.getenv("HERMES_URL", "http://127.0.0.1:6789/v1/chat/completions")
+HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
+HERMES_MODEL = os.getenv("HERMES_MODEL", "deepseek-chat")
 
-# Direct DeepSeek config (for fast voice turns — 5K tokens vs 43K)
+# Multi-provider LLM config (priority: Groq → DeepSeek → OpenAI → Local → Hermes)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")  # ~150ms first token
+
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
-# Lightweight system prompt for voice turns (SOUL.md + USER.md only)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+LOCAL_LLM_URL = os.getenv("LOCAL_LLM_URL", "")
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "qwen2.5-7b")
+LOCAL_LLM_KEY = os.getenv("LOCAL_LLM_KEY", "not-needed")
+
+
+def _pick_llm():
+    """Return (url, key, model, name) for the first available LLM provider.
+    Priority: Groq → DeepSeek → OpenAI → Local → Hermes
+    """
+    if GROQ_API_KEY:
+        return GROQ_URL, GROQ_API_KEY, GROQ_MODEL, "Groq"
+    if DEEPSEEK_API_KEY:
+        return DEEPSEEK_URL, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, "DeepSeek"
+    if OPENAI_API_KEY:
+        return OPENAI_URL, OPENAI_API_KEY, OPENAI_MODEL, "OpenAI"
+    if LOCAL_LLM_URL:
+        return LOCAL_LLM_URL, LOCAL_LLM_KEY, LOCAL_LLM_MODEL, "Local"
+    if HERMES_API_KEY or HERMES_URL:
+        return HERMES_URL, HERMES_API_KEY, HERMES_MODEL, "Hermes"
+    return None, None, None, None
+
+
+# Lightweight system prompt for voice turns (configurable)
+# Set JARVIS_SYSTEM_PROMPT_FILE to a file containing the system prompt.
+# If not set, falls back to ~/.hermes/SOUL.md + ~/.hermes/USER.md (Hermes users),
+# or a generic JARVIS persona.
 VOICE_SYSTEM_PROMPT = None  # loaded lazily
 
 def _load_voice_prompt():
     global VOICE_SYSTEM_PROMPT
     if VOICE_SYSTEM_PROMPT is not None:
         return VOICE_SYSTEM_PROMPT
-    
+
+    # Option 1: explicit file
+    prompt_file = os.getenv("JARVIS_SYSTEM_PROMPT_FILE", "")
+    if prompt_file and Path(prompt_file).exists():
+        VOICE_SYSTEM_PROMPT = Path(prompt_file).read_text()
+        return VOICE_SYSTEM_PROMPT
+
+    # Option 2: Hermes SOUL.md + USER.md (back-compat)
     parts = []
     for fname in [Path.home() / ".hermes" / "SOUL.md", Path.home() / ".hermes" / "USER.md"]:
         if fname.exists():
             parts.append(fname.read_text())
-    
-    VOICE_SYSTEM_PROMPT = (
-        "\n\n".join(parts) + 
-        "\n\n---\nYou are JARVIS, Marc's voice assistant. Keep responses SHORT — under 30 words. "
-        "Conversational, direct, no filler. You are speaking aloud, not typing."
-    )
+
+    if parts:
+        VOICE_SYSTEM_PROMPT = (
+            "\n\n".join(parts) +
+            "\n\n---\nYou are JARVIS, a concise voice assistant. Keep responses SHORT — under 30 words. "
+            "Conversational, direct, no filler. You are speaking aloud, not typing."
+        )
+    else:
+        # Option 3: generic persona
+        VOICE_SYSTEM_PROMPT = (
+            "You are JARVIS, a concise voice assistant. Keep responses under 25 words. "
+            "Speak conversationally, as if out loud. No markdown, no lists, no filler phrases. "
+            "Be direct and helpful. You have access to tools and memory; you can call them if needed."
+        )
     return VOICE_SYSTEM_PROMPT
 
 # Local Whisper STT server
-WHISPER_URL = "http://192.168.1.3:9001/v1/audio/transcriptions"
+WHISPER_URL = os.getenv("WHISPER_URL", "http://127.0.0.1:9001/v1/audio/transcriptions")
 
 # TTS cache directory
 CACHE_DIR = Path.home() / ".cache" / "jarvis-voice-shell" / "tts_cache"
@@ -941,17 +989,19 @@ async def voice_websocket(ws: WebSocket):
         stt_ms = (time.perf_counter() - t0) * 1000
         await ws.send_json({"type": "transcript", "text": transcript, "stt_ms": stt_ms})
 
-        # ── Step 2: Streaming LLM (DeepSeek) ──────────────────────
+        # ── Step 2: Streaming LLM (multi-provider) ─────────────────
         llm_start = time.perf_counter()
         system_prompt = _load_voice_prompt()
-        auth_key = DEEPSEEK_API_KEY or HERMES_API_KEY
-        api_url = DEEPSEEK_URL if DEEPSEEK_API_KEY else HERMES_URL
-        model = DEEPSEEK_MODEL if DEEPSEEK_API_KEY else HERMES_MODEL
-        max_tok = 120 if DEEPSEEK_API_KEY else 300
+        picked = _pick_llm()
+        api_url, auth_key, model, provider_name = picked
+        if not api_url:
+            await ws.send_json({"type": "error", "text": "No LLM configured. Set GROQ_API_KEY, DEEPSEEK_API_KEY, OPENAI_API_KEY, or LOCAL_LLM_URL in .env"})
+            processing = False
+            return
+        max_tok = 80  # voice responses are short — cap hard
 
         messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": transcript}]
-        if not DEEPSEEK_API_KEY:
-            messages = [{"role": "user", "content": transcript}]
+        logger.info(f"LLM provider: {provider_name}, model: {model}")
 
         full_response = ""
         try:
@@ -1050,24 +1100,23 @@ async def _process_chat(text: str):
 
     total_start = time.perf_counter()
 
-    # Step 1: Call DeepSeek directly with lightweight system prompt
+    # Step 1: Call LLM directly with lightweight system prompt (multi-provider)
     bridge_start = time.perf_counter()
     system_prompt = _load_voice_prompt()
-    
-    auth_key = DEEPSEEK_API_KEY or HERMES_API_KEY
-    api_url = DEEPSEEK_URL if DEEPSEEK_API_KEY else HERMES_URL
-    model = DEEPSEEK_MODEL if DEEPSEEK_API_KEY else HERMES_MODEL
-    max_tok = 150 if DEEPSEEK_API_KEY else 300
-    
+
+    picked = _pick_llm()
+    api_url, auth_key, model, provider_name = picked
+    if not api_url:
+        return {"error": "No LLM configured. Set GROQ_API_KEY, DEEPSEEK_API_KEY, OPENAI_API_KEY, or LOCAL_LLM_URL in .env"}
+    max_tok = 100  # voice responses are short
+
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
-    if not DEEPSEEK_API_KEY:
-        messages = [{"role": "user", "content": text}]  # Hermes injects its own system prompt
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             api_url,
             json={"model": model, "messages": messages, "max_tokens": max_tok, "stream": False},
-            headers={"Authorization": "Bearer " + auth_key, "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {auth_key}", "Content-Type": "application/json"},
         )
         response.raise_for_status()
         data = response.json()

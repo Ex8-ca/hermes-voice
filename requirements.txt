@@ -1,0 +1,12 @@
+# ── Dependencies for the desktop CLI / dev install ──
+# Install: pip install -e .[audio,stt]
+edge-tts>=6.1.0
+aiohttp>=3.9.0
+pydantic>=2.0
+python-dotenv>=1.0.0
+rich>=13.0
+click>=8.0
+keyboard>=0.13.5
+numpy>=2.0
+scipy>=1.13
+websockets>=12.0
