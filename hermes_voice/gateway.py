@@ -168,6 +168,10 @@ async def _run_tool_loop(
         tool_start = time.perf_counter()
         tool_result = await dispatch_tool(tool_name, tool_kwargs, fallback=True, timeout_s=15.0)
         tool_ms = (time.perf_counter() - tool_start) * 1000
+        if tool_result.error:
+            logger.warning(
+                f"Tool '{tool_result.source or tool_name}' errored in {tool_ms:.0f}ms: {tool_result.error}"
+            )
         logger.info(
             f"Tool '{tool_result.source or tool_name}' done in {tool_ms:.0f}ms: "
             f"{len(tool_result.text)} chars"

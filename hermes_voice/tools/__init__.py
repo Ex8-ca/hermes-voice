@@ -36,7 +36,7 @@ import logging
 
 logger = logging.getLogger("hermes-voice.tools")
 
-for _builtin in ("memex8_search", "web_search"):
+for _builtin in ("memex8_search", "web_search", "agentmail"):
     try:
         importlib.import_module(f".{_builtin}", package="hermes_voice.tools")
     except ImportError as e:

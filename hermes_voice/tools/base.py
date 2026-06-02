@@ -33,15 +33,19 @@ class ToolResult:
         text: Plain text result to feed back to the LLM. If empty and
             `success=True`, the dispatcher will try the next tool.
         success: True if the tool ran (even if it found nothing).
-            False means the tool itself failed (exception, timeout, etc.)
+            False means the tool itself failed (exception, timeout, etc).
         data: Optional structured data (e.g. the raw search results).
             The LLM doesn't see this; useful for callers.
         source: Which tool produced this (for debugging/observability).
+        error: Optional error message (only set when success=False). Logged
+            by the gateway but NOT sent to the LLM. Use `text` to
+            communicate errors to the LLM if it should know.
     """
     text: str
     success: bool = True
     data: Optional[dict] = None
     source: Optional[str] = None
+    error: Optional[str] = None
 
     def is_empty(self) -> bool:
         """True if this result has no useful text for the LLM."""
