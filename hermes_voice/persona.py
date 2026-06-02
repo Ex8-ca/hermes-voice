@@ -40,18 +40,20 @@ def _load_voice_prompt() -> str:
         logger.info(f"Voice prompt loaded from {prompt_file} ({len(_VOICE_PROMPT_CACHE)} chars)")
         return _VOICE_PROMPT_CACHE
 
-    # Option 2: ~/.hermes/VOICE.md (recommended)
-    # Option 3: ~/.hermes/SOUL.md (back-compat with JARVIS Voice Shell)
+    # Option 2: ~/.hermes/VOICE.md (recommended) — single source of truth for voice
+    # Option 3: ~/.hermes/SOUL.md (back-compat fallback only — used if VOICE.md is absent)
     parts = []
-    for fname in [
-        Path.home() / ".hermes" / "VOICE.md",
-        Path.home() / ".hermes" / "SOUL.md",
-    ]:
-        if fname.exists():
-            parts.append(fname.read_text(encoding="utf-8"))
-            logger.info(f"Voice prompt: using {fname}")
+    voice_md = Path.home() / ".hermes" / "VOICE.md"
+    soul_md = Path.home() / ".hermes" / "SOUL.md"
+    if voice_md.exists():
+        # VOICE.md is authoritative — don't double up with SOUL.md
+        parts.append(voice_md.read_text(encoding="utf-8"))
+        logger.info(f"Voice prompt: using {voice_md} (authoritative)")
+    elif soul_md.exists():
+        parts.append(soul_md.read_text(encoding="utf-8"))
+        logger.info(f"Voice prompt: using {soul_md} (no VOICE.md found, falling back)")
 
-    # USER.md (optional user context)
+    # USER.md (optional user context — always additive)
     user_md = Path.home() / ".hermes" / "USER.md"
     if user_md.exists():
         parts.append("\n\n# User Context\n" + user_md.read_text(encoding="utf-8"))
