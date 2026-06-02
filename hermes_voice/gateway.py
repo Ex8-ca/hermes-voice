@@ -597,22 +597,46 @@ async def voice_websocket(ws: WebSocket):
             logger.exception("voice memory: failed to append assistant turn")
 
         # ── Step 3: TTS streaming ─────────────────────────────────
-        await ws.send_json({"type": "speaking"})
+        # Notify clients that audio is starting. Send both:
+        #   - "speaking" (legacy, for old clients that listen for it)
+        #   - "tts_playing" with playing=true (canonical, used by barge-in)
+        try:
+            await ws.send_json({"type": "speaking"})
+        except WebSocketDisconnect:
+            return
+        try:
+            await ws.send_json({"type": "tts_playing", "playing": True})
+        except WebSocketDisconnect:
+            return
 
         text_hash = hashlib.sha256(full_response.encode()).hexdigest()[:16]
         cache_path = CACHE_DIR / f"tts_{text_hash}.mp3"
 
-        if cache_path.exists():
-            tts_data = cache_path.read_bytes()
-            await ws.send_bytes(tts_data)
-        else:
-            communicate = edge_tts.Communicate(text=full_response, voice="en-GB-RyanNeural", rate="+0%")
-            tts_chunks = []
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    tts_chunks.append(chunk["data"])
-                    await ws.send_bytes(chunk["data"])
-            cache_path.write_bytes(b"".join(tts_chunks))
+        try:
+            if cache_path.exists():
+                tts_data = cache_path.read_bytes()
+                await ws.send_bytes(tts_data)
+            else:
+                communicate = edge_tts.Communicate(text=full_response, voice="en-GB-RyanNeural", rate="+0%")
+                tts_chunks: list[bytes] = []
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        tts_chunks.append(chunk["data"])
+                        await ws.send_bytes(chunk["data"])
+                cache_path.write_bytes(b"".join(tts_chunks))
+        except WebSocketDisconnect:
+            # Client hung up mid-TTS (probably barged in and disconnected).
+            logger.info("TTS send aborted: client disconnected")
+            processing = False
+            vad.reset()
+            return
+
+        # Turn complete. tts_playing=false tells barge-in clients they can
+        # stop watching for interrupts.
+        try:
+            await ws.send_json({"type": "tts_playing", "playing": False})
+        except WebSocketDisconnect:
+            return
 
         await ws.send_json({"type": "done"})
         processing = False
@@ -620,7 +644,7 @@ async def voice_websocket(ws: WebSocket):
         try:
             await ws.send_json({"type": "vad_state", "state": "idle"})
         except WebSocketDisconnect:
-            pass
+            return
 
     # Start receive loop
     receive_task = asyncio.create_task(receive_loop())

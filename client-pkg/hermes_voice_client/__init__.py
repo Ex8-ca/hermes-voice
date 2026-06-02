@@ -37,7 +37,7 @@ from typing import Optional
 import numpy as np
 import sounddevice as sd
 
-__version__ = "0.1.4"
+__version__ = "0.2.0"
 
 logger = logging.getLogger("hermes-voice-client")
 
@@ -272,6 +272,24 @@ class Speaker:
         if self._task:
             await self._task
 
+    def clear(self) -> None:
+        """Drop any pending PCM chunks. Used by barge-in to stop playback.
+
+        Non-async because it's called from the sender (mic) loop, which
+        can't await safely. The PortAudio callback will see an empty queue
+        on the next call and write silence; any chunks still in the queue
+        are discarded.
+        """
+        dropped = 0
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+        if dropped:
+            logger.info("Barge-in: dropped %d pending PCM chunks", dropped)
+
 
 # ── Server message routing ───────────────────────────────────────────
 
@@ -338,6 +356,14 @@ async def run() -> None:
     mic = MicCapture(device=input_device)
     mic.start()
 
+    # Barge-in tuning. The mic signal during TTS playback includes the AI's
+    # own audio leaking through speakers/headphones — sidetone. We need a
+    # threshold high enough to ignore that, but low enough to catch real
+    # speech. 2500 works for desktop mics; raise to 4000+ for sensitive
+    # USB headsets that pick up more speaker bleed.
+    _BARGE_ENERGY_THRESHOLD = int(os.environ.get("HERMES_BARGE_THRESHOLD", "2500"))
+    _BARGE_HOLD_FRAMES = 4   # 4 × 63ms = 250ms above threshold before triggering
+
     reconnect_delay = 1.0
     while True:
         try:
@@ -347,18 +373,51 @@ async def run() -> None:
                 logger.info("WebSocket connected")
                 reconnect_delay = 1.0
 
+                # State shared between sender/receiver. Modified via nonlocal.
+                barge_state = {
+                    "tts_playing": False,    # server told us TTS is active
+                    "above_thresh": 0,       # consecutive frames over threshold
+                    "barge_sent": False,     # debounce: one barge_in per TTS burst
+                }
+
                 async def sender():
                     while True:
                         frame = mic.read()
-                        if frame:
-                            await ws.send(frame)
-                        else:
+                        if not frame:
                             await asyncio.sleep(0.01)
+                            continue
+                        await ws.send(frame)
+                        # Barge-in: if TTS is playing and we see real mic energy,
+                        # interrupt. The frame is int16 PCM; RMS of normalized
+                        # samples is a good proxy for energy.
+                        if barge_state["tts_playing"] and not barge_state["barge_sent"]:
+                            samples = np.frombuffer(frame, dtype="<i2").astype(np.float32)
+                            if samples.size:
+                                rms = float(np.sqrt(np.mean(samples * samples)))
+                                if rms > _BARGE_ENERGY_THRESHOLD:
+                                    barge_state["above_thresh"] += 1
+                                    if barge_state["above_thresh"] >= _BARGE_HOLD_FRAMES:
+                                        logger.info(
+                                            "Barge-in: interrupting TTS (mic RMS=%.0f > %d for %d frames)",
+                                            rms, _BARGE_ENERGY_THRESHOLD, barge_state["above_thresh"],
+                                        )
+                                        try:
+                                            await ws.send(json.dumps({"type": "barge_in"}))
+                                        except Exception as e:
+                                            logger.warning("Barge-in send failed: %s", e)
+                                        # Stop playback immediately on our side.
+                                        speaker.clear()
+                                        barge_state["barge_sent"] = True
+                                else:
+                                    barge_state["above_thresh"] = 0
+                        elif not barge_state["tts_playing"]:
+                            # Reset debounce when not in TTS.
+                            barge_state["above_thresh"] = 0
+                            barge_state["barge_sent"] = False
 
                 # Buffer for reassembling fragmented MP3 (TTS streams as many
                 # tiny binary frames; miniaudio needs the complete MP3 to decode).
                 mp3_buffer = bytearray()
-                mp3_playing = False
 
                 async def _flush_mp3():
                     """Decode and play whatever's in the MP3 buffer, then clear it."""
@@ -372,7 +431,7 @@ async def run() -> None:
                     mp3_buffer = bytearray()
 
                 async def receiver():
-                    nonlocal mp3_buffer, mp3_playing
+                    nonlocal mp3_buffer
                     while True:
                         msg = await ws.recv()
                         if isinstance(msg, (bytes, bytearray)):
@@ -388,6 +447,13 @@ async def run() -> None:
                             mtype = data.get("type")
                             if mtype == "vad_state":
                                 logger.debug("VAD: %s", data.get("state"))
+                            elif mtype == "tts_playing":
+                                # Canonical barge-in signal from server.
+                                barge_state["tts_playing"] = bool(data.get("playing"))
+                                if not barge_state["tts_playing"]:
+                                    # Reset barge debounce for next TTS burst.
+                                    barge_state["above_thresh"] = 0
+                                    barge_state["barge_sent"] = False
                             elif mtype == "transcript":
                                 logger.info("Transcript: %s", data.get("text"))
                             elif mtype == "token":
