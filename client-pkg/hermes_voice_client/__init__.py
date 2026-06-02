@@ -37,7 +37,7 @@ from typing import Optional
 import numpy as np
 import sounddevice as sd
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 logger = logging.getLogger("hermes-voice-client")
 
@@ -328,13 +328,67 @@ async def run() -> None:
                         else:
                             await asyncio.sleep(0.01)
 
+                # Buffer for reassembling fragmented MP3 (TTS streams as many
+                # tiny binary frames; miniaudio needs the complete MP3 to decode).
+                mp3_buffer = bytearray()
+                mp3_playing = False
+
+                async def _flush_mp3():
+                    """Decode and play whatever's in the MP3 buffer, then clear it."""
+                    nonlocal mp3_buffer
+                    if not mp3_buffer:
+                        return
+                    logger.info(
+                        "TTS received: %d bytes MP3, decoding...", len(mp3_buffer)
+                    )
+                    await speaker.play(bytes(mp3_buffer))
+                    mp3_buffer = bytearray()
+
                 async def receiver():
+                    nonlocal mp3_buffer, mp3_playing
                     while True:
                         msg = await ws.recv()
                         if isinstance(msg, (bytes, bytearray)):
-                            await speaker.play(bytes(msg))
+                            # Accumulate TTS binary frames. Decoding waits for `done`.
+                            mp3_buffer.extend(msg)
                         else:
-                            _handle_text(msg)
+                            # Text frames: routing, status, and turn-end signals.
+                            try:
+                                data = json.loads(msg)
+                            except json.JSONDecodeError:
+                                logger.debug("Non-JSON msg: %r", msg[:80])
+                                continue
+                            mtype = data.get("type")
+                            if mtype == "vad_state":
+                                logger.debug("VAD: %s", data.get("state"))
+                            elif mtype == "transcript":
+                                logger.info("Transcript: %s", data.get("text"))
+                            elif mtype == "token":
+                                sys.stdout.write(data.get("text", ""))
+                                sys.stdout.flush()
+                            elif mtype == "response_complete":
+                                print()
+                                logger.info(
+                                    "Response done in %sms", data.get("llm_ms")
+                                )
+                            elif mtype == "speaking":
+                                logger.info("TTS playing...")
+                            elif mtype == "error":
+                                logger.error(
+                                    "Server error: %s", data.get("message")
+                                )
+                                # Drop any partial MP3 — TTS aborted.
+                                if mp3_buffer:
+                                    logger.warning(
+                                        "Discarding %d bytes of partial MP3",
+                                        len(mp3_buffer),
+                                    )
+                                    mp3_buffer = bytearray()
+                            elif mtype == "done":
+                                # Turn complete — play the accumulated TTS.
+                                await _flush_mp3()
+                            else:
+                                logger.debug("Server msg: %s", mtype)
 
                 send_task = asyncio.create_task(sender())
                 recv_task = asyncio.create_task(receiver())
