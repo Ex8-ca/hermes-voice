@@ -2,7 +2,7 @@ name: hermes-voice
 version: 1.0.0
 description: "Voice interface for Hermes Agent — real-time VAD, local Whisper STT, streaming LLM, and Edge TTS. Browser UI at port 8989 with barge-in support."
 author: Marc
-kind: service
+kind: standalone
 requires_env:
   - name: DEEPSEEK_API_KEY
     description: "DeepSeek API key for the voice LLM pipeline"
