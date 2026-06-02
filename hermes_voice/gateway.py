@@ -48,7 +48,7 @@ try:
 except ImportError:
     pass
 
-from llm import pick_llm, stream_chat  # noqa: E402
+from llm import pick_llm, stream_chat, stream_chat_with_fallback  # noqa: E402
 from hermes_voice import tools as _tools_pkg  # noqa: E402  (triggers tool self-registration)
 from hermes_voice.tools import REGISTRY as TOOL_REGISTRY  # noqa: E402
 from hermes_voice.tools import dispatch as dispatch_tool  # noqa: E402
@@ -109,6 +109,7 @@ async def _run_tool_loop(
     filler_tts_to_ws=None,
     max_rounds: int = 3,
     on_tool_result=None,
+    on_llm_fallback=None,
 ) -> str:
     """Run the LLM's tool-call loop until we get a final answer.
 
@@ -245,7 +246,11 @@ async def _run_tool_loop(
                 },
             ]
             response_text = ""
-            async for content in stream_chat(follow_messages, max_tokens=max_tok):
+            async for content in stream_chat_with_fallback(
+                follow_messages,
+                max_tokens=max_tok,
+                on_fallback=on_llm_fallback,
+            ):
                 if not content:
                     continue
                 response_text += content
@@ -672,6 +677,25 @@ async def voice_websocket(ws: WebSocket):
             except Exception:
                 logger.exception("voice memory: failed to append tool result")
 
+        async def _ws_on_fallback(failed: str, next_provider: str) -> None:
+            """Announce the LLM provider switch to the user so they know
+            the response is coming from a different model. Best-effort —
+            if the WS is gone we just log it."""
+            try:
+                # We don't TTS the provider name (the user doesn't care
+                # about Groq vs DeepSeek), we just acknowledge the switch
+                # so a silent 1-2s gap doesn't feel like a hang.
+                await ws.send_json({
+                    "type": "filler",
+                    "text": "still working on it",
+                })
+            except Exception:
+                pass
+            logger.info(
+                f"LLM provider fallback: {failed} -> {next_provider}, "
+                f"sent filler to client"
+            )
+
         full_response = await _run_tool_loop(
             full_response,
             messages,
@@ -679,6 +703,7 @@ async def voice_websocket(ws: WebSocket):
             on_token=_ws_on_token,
             filler_tts_to_ws=ws,
             on_tool_result=_ws_on_tool_result,
+            on_llm_fallback=_ws_on_fallback,
         )
 
         # Write assistant turn to voice memory (fire-and-forget). Strips any
