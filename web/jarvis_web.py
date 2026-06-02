@@ -312,8 +312,8 @@ async def index():
 </head>
 <body>
     <div class="container">
-        <h1>JARVIS <span style="color:#00ff88;font-size:14px;vertical-align:middle;margin-left:8px;font-weight:normal">v2.3</span></h1>
-        <p style="color: #666; margin-bottom: 20px;">Tap 🎤 and speak — auto-detects when you stop</p>
+        <h1>JARVIS <span style="color:#00ff88;font-size:14px;vertical-align:middle;margin-left:8px;font-weight:normal">v2.4</span></h1>
+        <p style="color: #666; margin-bottom: 20px;">Tap 🎤 and speak — auto-detects when you stop (barge-in enabled)</p>
 
         <div class="status" id="status">Ready</div>
         <div id="vad-indicator" style="height:4px;width:100%;max-width:400px;margin:-10px auto 10px;border-radius:2px;background:#222;overflow:hidden;">
@@ -379,15 +379,31 @@ async def index():
 
                 audioContext = new AudioContext({ sampleRate: 16000 });
                 const source = audioContext.createMediaStreamSource(stream);
-                processor = audioContext.createScriptProcessor(4096, 1, 1);
 
-                processor.onaudioprocess = (e) => {
+                // ── Sidetone cancellation setup ─────────────────────────
+                // Chain: mic source → cancelNode (mic - delayed_tts) → destination (silent)
+                // TTS playback feeds: ttsSource → delayNode (~80ms) → cancelNode
+                // The cancelNode reads mic input, subtracts the TTS reference,
+                // and emits the cleaned PCM (with the AI's voice removed).
+                ttsDelayNode = audioContext.createDelay(0.5);
+                ttsDelayNode.delayTime.value = TTS_SIDETONE_DELAY_MS / 1000;
+
+                ttsCancelNode = audioContext.createScriptProcessor(4096, 2, 1);
+                // Channel 0 = mic input (positive)
+                // Channel 1 = TTS reference, delayed (subtract)
+                ttsCancelNode.onaudioprocess = (e) => {
                     if (!isListening) return;
-                    const inputData = e.inputBuffer.getChannelData(0);
-                    // Float32 [-1, 1] → Int16 PCM little-endian
-                    const pcm = new Int16Array(inputData.length);
-                    for (let i = 0; i < inputData.length; i++) {
-                        const s = Math.max(-1, Math.min(1, inputData[i]));
+                    const micIn = e.inputBuffer.getChannelData(0);
+                    const ttsRef = e.inputBuffer.getChannelData(1);
+                    const out = e.outputBuffer.getChannelData(0);
+                    // Subtract: out = mic - ttsRef
+                    for (let i = 0; i < micIn.length; i++) {
+                        out[i] = micIn[i] - ttsRef[i];
+                    }
+                    // Send CLEANED mic PCM to server for VAD + STT
+                    const pcm = new Int16Array(out.length);
+                    for (let i = 0; i < out.length; i++) {
+                        const s = Math.max(-1, Math.min(1, out[i]));
                         pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
                     const buf = pcm.buffer;
@@ -396,8 +412,12 @@ async def index():
                     }
                 };
 
-                source.connect(processor);
-                processor.connect(audioContext.destination);
+                source.connect(ttsCancelNode);
+                ttsDelayNode.connect(ttsCancelNode);
+                ttsCancelNode.connect(audioContext.destination);
+
+                // Keep a reference to the old processor in case other code needs it
+                processor = ttsCancelNode;
 
                 recordingStart = Date.now();
                 isListening = true;
@@ -428,8 +448,25 @@ async def index():
             document.getElementById('vad-bar').style.width = '0%';
 
             if (processor) { try { processor.disconnect(); } catch {} processor = null; }
+            if (ttsCancelNode) { try { ttsCancelNode.disconnect(); } catch {} ttsCancelNode = null; }
+            if (ttsDelayNode) { try { ttsDelayNode.disconnect(); } catch {} ttsDelayNode = null; }
             if (audioContext) { try { audioContext.close(); } catch {} audioContext = null; }
             if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+        }
+
+        function stopTtsPlayback() {
+            // Stop any playing TTS audio and disconnect from the cancellation graph
+            if (ttsRefSource) {
+                try { ttsRefSource.stop(); } catch {}
+                try { ttsRefSource.disconnect(); } catch {}
+                ttsRefSource = null;
+            }
+            ttsIsPlaying = false;
+            if (currentAudio) { try { currentAudio.pause(); } catch {} currentAudio = null; }
+            if (audioChunksReceived.length > 0) {
+                URL.revokeObjectURL(audioChunksReceived._url || '');
+            }
+            audioChunksReceived = [];
         }
 
         function resetUI() {
@@ -462,6 +499,19 @@ async def index():
         let currentAudio = null;
         let processing = false;
 
+        // ── TTS playback + sidetone cancellation (barge-in) ────────────
+        // ttsAudioCtx: shared context for both mic recording and TTS playback.
+        // When TTS is playing, we route a copy of the AI audio into a delay line
+        // and subtract it from the mic input so the user's VAD doesn't trigger
+        // on the AI's own voice coming through their speakers.
+        let ttsIsPlaying = false;
+        let ttsCancelNode = null;       // ScriptProcessor that does mic - tts_ref
+        let ttsDelayNode = null;        // ~80ms delay to align TTS ref with mic input
+        let ttsRefSource = null;        // AudioBufferSourceNode playing the AI audio
+        const TTS_SIDETONE_DELAY_MS = 80;   // empirically: avg browser output latency
+        const BARGE_IN_RMS = 600;           // mic energy threshold DURING TTS playback
+        const NORMAL_RMS = 300;             // mic energy threshold when TTS is silent
+
         function connectWebSocket() {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(proto + '//' + location.host + '/ws');
@@ -484,9 +534,23 @@ async def index():
                                 showStatus('Processing...', 'thinking');
                             } else if (msg.state === 'speaking') {
                                 showStatus('Speaking...', 'speaking');
+                                // BARGE-IN: server VAD triggered while AI is still talking
+                                // → user is interrupting. Cancel TTS + in-flight LLM.
+                                if (ttsIsPlaying) {
+                                    console.log('Barge-in detected — interrupting AI');
+                                    stopTtsPlayback();
+                                    if (ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({ type: 'barge_in' }));
+                                    }
+                                }
                             } else if (msg.state === 'idle' && !processing) {
                                 showStatus('🎙 Listening... speak naturally', 'listening');
                             }
+                            break;
+
+                        case 'barge_in_ack':
+                            // Server confirmed the cancellation — make sure client is quiet
+                            stopTtsPlayback();
                             break;
 
                         case 'interim_transcript':
@@ -540,13 +604,62 @@ async def index():
             };
         }
 
-        function playAudioChunks() {
-            if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+        async function playAudioChunks() {
+            if (audioChunksReceived.length === 0) return;
+            if (currentAudio) { try { currentAudio.pause(); } catch {} currentAudio = null; }
+
             const blob = new Blob(audioChunksReceived, { type: 'audio/mpeg' });
             const url = URL.createObjectURL(blob);
-            currentAudio = new Audio(url);
-            currentAudio.play();
-            currentAudio.onended = () => { URL.revokeObjectURL(url); currentAudio = null; };
+
+            try {
+                // Decode MP3 → AudioBuffer via the recording context (so timing is
+                // sample-accurate with the cancellation graph). If no recording
+                // context exists (e.g. text chat), create a throwaway one.
+                let ctx = audioContext;
+                if (!ctx) {
+                    ctx = new AudioContext({ sampleRate: 16000 });
+                }
+                // Resume the context if it's suspended (autoplay policy)
+                if (ctx.state === 'suspended') {
+                    await ctx.resume();
+                }
+                const arrayBuf = await blob.arrayBuffer();
+                const audioBuf = await ctx.decodeAudioData(arrayBuf);
+
+                // Source: plays AI audio to speakers AND feeds the sidetone delay
+                ttsRefSource = ctx.createBufferSource();
+                ttsRefSource.buffer = audioBuf;
+
+                // 1. To speakers
+                ttsRefSource.connect(ctx.destination);
+                // 2. To sidetone delay (so it lands at the mic ~80ms later, aligned)
+                if (ttsDelayNode) {
+                    ttsRefSource.connect(ttsDelayNode);
+                }
+
+                ttsRefSource.onended = () => {
+                    ttsIsPlaying = false;
+                    ttsRefSource = null;
+                    URL.revokeObjectURL(url);
+                };
+
+                ttsIsPlaying = true;
+                ttsRefSource.start(0);
+                currentAudio = null;  // we use Web Audio now, not the <audio> element
+                return;
+            } catch (err) {
+                console.error('Web Audio playback failed, falling back to <audio>:', err);
+                // Fallback: plain <audio> element (no sidetone cancellation, but works)
+                const audio = new Audio(url);
+                currentAudio = audio;
+                ttsIsPlaying = true;
+                audio.play();
+                audio.onended = () => {
+                    ttsIsPlaying = false;
+                    currentAudio = null;
+                    URL.revokeObjectURL(url);
+                };
+            }
         }
 
         connectWebSocket();
@@ -884,13 +997,43 @@ async def voice_websocket(ws: WebSocket):
                 pass
 
     async def receive_loop():
-        """Continuously receive PCM chunks from browser and feed VAD."""
+        """Continuously receive PCM chunks and control messages from browser."""
         nonlocal speech_buffer, interim_seq, last_interim_send, processing, current_task
 
         try:
             while True:
-                data = await ws.receive_bytes()
-                if len(data) < SAMPLES_PER_FRAME * 2:
+                msg = await ws.receive()
+
+                if msg["type"] == "websocket.disconnect":
+                    break
+
+                # Text message = control plane (barge_in, etc.)
+                if "text" in msg:
+                    try:
+                        ctrl = _json.loads(msg["text"])
+                    except Exception:
+                        continue
+                    if ctrl.get("type") == "barge_in":
+                        # User spoke while AI was responding — cancel in-flight task
+                        if current_task and not current_task.done():
+                            current_task.cancel()
+                            logger.info("Barge-in: cancelled in-flight LLM/TTS task")
+                            try:
+                                await ws.send_json({"type": "barge_in_ack"})
+                            except Exception:
+                                pass
+                        # Reset VAD so we start fresh for the new utterance
+                        vad.reset()
+                        processing = False
+                        try:
+                            await ws.send_json({"type": "vad_state", "state": "idle"})
+                        except Exception:
+                            pass
+                    continue
+
+                # Binary = PCM audio chunk
+                data = msg.get("bytes")
+                if not data or len(data) < SAMPLES_PER_FRAME * 2:
                     continue
 
                 old_state = vad.state.value
