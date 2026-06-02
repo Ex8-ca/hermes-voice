@@ -26,6 +26,7 @@ if str(_PLUGIN_DIR) not in sys.path:
 
 from vad import EnergyVAD, VADState, rms_int16  # noqa: E402
 from persona import _load_voice_prompt  # noqa: E402
+from memory import append_user, append_assistant, append_tool  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("hermes-voice.gateway")
@@ -54,12 +55,12 @@ from hermes_voice.tools import dispatch as dispatch_tool  # noqa: E402
 from hermes_voice.tools import pick_filler  # noqa: E402
 from hermes_voice.tools import parse_tool_call, strip_tool_call  # noqa: E402
 
-app = FastAPI(title="JARVIS Voice Web")
+app = FastAPI(title="Hermes Voice Web")
 
 
 # Voice system prompt is loaded by the `persona` module (see persona.py).
 # Resolution order: HERMES_VOICE_PROMPT_FILE → ~/.hermes/VOICE.md → ~/.hermes/SOUL.md
-# → ~/.hermes/USER.md (optional) → generic JARVIS persona.
+# → ~/.hermes/USER.md (optional) → generic Hermes persona.
 
 
 def _build_tool_list_section() -> str:
@@ -107,6 +108,7 @@ async def _run_tool_loop(
     on_token=None,
     filler_tts_to_ws=None,
     max_rounds: int = 3,
+    on_tool_result=None,
 ) -> str:
     """Run the LLM's tool-call loop until we get a final answer.
 
@@ -130,6 +132,9 @@ async def _run_tool_loop(
         filler_tts_to_ws: Optional WebSocket to send `filler` JSON events
             and filler-phrase MP3 bytes to. If None, no filler TTS is
             generated (chat endpoint).
+        on_tool_result: Optional async callback(name: str, text: str) called
+            for each tool result, BEFORE the LLM follow-up call. Used by the
+            gateway to write tool results to voice memory.
     """
     import time
 
@@ -167,6 +172,16 @@ async def _run_tool_loop(
             f"Tool '{tool_result.source or tool_name}' done in {tool_ms:.0f}ms: "
             f"{len(tool_result.text)} chars"
         )
+
+        # Notify caller (e.g. gateway writing to voice memory) of tool result
+        if on_tool_result is not None and not tool_result.is_empty():
+            try:
+                await on_tool_result(
+                    tool_result.source or tool_name,
+                    tool_result.text,
+                )
+            except Exception:
+                logger.exception("on_tool_result callback failed (non-fatal)")
 
         # If the tool produced nothing useful (and we have no more fallbacks
         # in the chain), just use the LLM's surrounding text and skip the
@@ -212,7 +227,7 @@ async def _run_tool_loop(
 WHISPER_URL = os.getenv("WHISPER_URL", "http://127.0.0.1:9001/v1/audio/transcriptions")
 
 # TTS cache directory
-CACHE_DIR = Path.home() / ".cache" / "jarvis-voice-shell" / "tts_cache"
+CACHE_DIR = Path.home() / ".cache" / "hermes-voice" / "tts_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -494,6 +509,13 @@ async def voice_websocket(ws: WebSocket):
         stt_ms = (time.perf_counter() - t0) * 1000
         await ws.send_json({"type": "transcript", "text": transcript, "stt_ms": stt_ms})
 
+        # Write user turn to voice memory (fire-and-forget — never blocks the
+        # voice pipeline. The next LLM call will see this turn as context.)
+        try:
+            append_user(transcript)
+        except Exception:
+            logger.exception("voice memory: failed to append user turn")
+
         # ── Step 2: Streaming LLM (multi-provider) ─────────────────
         llm_start = time.perf_counter()
         base_prompt = _load_voice_prompt()
@@ -545,13 +567,28 @@ async def voice_websocket(ws: WebSocket):
             except Exception:
                 pass
 
+        async def _ws_on_tool_result(name: str, text: str) -> None:
+            # Write tool result to voice memory (fire-and-forget)
+            try:
+                append_tool(name, text)
+            except Exception:
+                logger.exception("voice memory: failed to append tool result")
+
         full_response = await _run_tool_loop(
             full_response,
             messages,
             max_tok,
             on_token=_ws_on_token,
             filler_tts_to_ws=ws,
+            on_tool_result=_ws_on_tool_result,
         )
+
+        # Write assistant turn to voice memory (fire-and-forget). Strips any
+        # remaining [[TOOL:...]] markers so the log is human-readable.
+        try:
+            append_assistant(full_response)
+        except Exception:
+            logger.exception("voice memory: failed to append assistant turn")
 
         # ── Step 3: TTS streaming ─────────────────────────────────
         await ws.send_json({"type": "speaking"})
@@ -634,7 +671,24 @@ async def _process_chat(text: str):
 
     # Step 1.5: Tool dispatch (chat endpoint) — silently runs tools and feeds
     # the result back to the LLM. The final response_text has the cleaned answer.
-    response_text = await _run_tool_loop(response_text, messages, max_tok)
+    async def _chat_on_tool_result(name: str, tool_text: str) -> None:
+        try:
+            append_tool(name, tool_text)
+        except Exception:
+            logger.exception("voice memory: failed to append tool result (chat)")
+
+    response_text = await _run_tool_loop(
+        response_text, messages, max_tok, on_tool_result=_chat_on_tool_result
+    )
+
+    # Persist this turn to voice memory (chat endpoint also shares the log,
+    # so a conversation that starts in chat continues seamlessly if the user
+    # switches to voice, or vice versa).
+    try:
+        append_user(text)
+        append_assistant(response_text)
+    except Exception:
+        logger.exception("voice memory: failed to append chat turn")
 
     # Step 2: Generate TTS using edge-tts
     tts_start = time.perf_counter()

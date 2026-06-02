@@ -1,14 +1,14 @@
 """
-JARVIS Voice Client — Python client for the JARVIS WebSocket gateway.
+hermes-voice client — Python client for the Hermes Voice WebSocket gateway.
 
 - Captures mic from default audio device
-- Sends PCM frames over WebSocket to the JARVIS gateway
+- Sends PCM frames over WebSocket to the Hermes gateway
 - Receives TTS MP3 chunks and plays through default audio device
 - Barge-in: detects user voice during TTS playback and interrupts the AI
   (requires gateway with barge-in support, e.g. web/jarvis_web.py v2.4+)
 
 Use this for split-architecture deployments: mic on one machine, the
-JARVIS gateway (which runs Whisper STT, LLM, and TTS) on another.
+Hermes gateway (which runs Whisper STT, LLM, and TTS) on another.
 
 For single-machine deployments, use the web UI at web/jarvis_web.py instead.
 
@@ -16,7 +16,7 @@ Usage:
     python3 jarvis_voice_client.py [--host <gateway-host>] [--port <gateway-port>]
 
 Or via environment:
-    JARVIS_WS_HOST=192.168.1.50 JARVIS_WS_PORT=8989 python3 jarvis_voice_client.py
+    HERMES_VOICE_WS_HOST=192.168.1.50 HERMES_VOICE_WS_PORT=8989 python3 jarvis_voice_client.py
 
 Dependencies (in venv):
     sounddevice, numpy, websockets, miniaudio
@@ -44,16 +44,16 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("jarvis-voice-client")
+logger = logging.getLogger("hermes-voice-client")
 
 
 # ── Config ────────────────────────────────────────────────────────────
 
-# Defaults to localhost — set JARVIS_WS_HOST to your gateway's IP for split setups.
+# Defaults to localhost — set HERMES_VOICE_WS_HOST to your gateway's IP for split setups.
 # Default port 8989 (jarvis_web.py) supports barge-in. Port 6790 is the older
 # jarvis_ws_gateway.py which doesn't support barge-in (graceful degradation).
-WS_HOST = os.environ.get("JARVIS_WS_HOST", "127.0.0.1")
-WS_PORT = int(os.environ.get("JARVIS_WS_PORT", "8989"))
+WS_HOST = os.environ.get("HERMES_VOICE_WS_HOST", "127.0.0.1")
+WS_PORT = int(os.environ.get("HERMES_VOICE_WS_PORT", "8989"))
 WS_URL = f"ws://{WS_HOST}:{WS_PORT}/ws"
 
 AUDIO_SAMPLE_RATE = 16000
@@ -66,31 +66,31 @@ BYTES_PER_FRAME = SAMPLES_PER_FRAME * AUDIO_SAMPLE_WIDTH  # 2016
 # SIDETONE_DELAY_MS: estimated time between TTS audio leaving the speakers
 # and being picked up by the mic. Subtract this much TTS ref from the
 # mic frame. Tune for your hardware.
-SIDETONE_DELAY_MS = int(os.environ.get("JARVIS_SIDETONE_DELAY_MS", "80"))
+SIDETONE_DELAY_MS = int(os.environ.get("HERMES_VOICE_SIDETONE_DELAY_MS", "80"))
 SIDETONE_DELAY_SAMPLES = AUDIO_SAMPLE_RATE * SIDETONE_DELAY_MS // 1000  # e.g. 1280
 
 # BARGE_IN_RMS: minimum RMS amplitude on the CLEANED mic to trigger
 # barge-in while TTS is playing. Higher = more deliberate speech required
 # to interrupt. Recommended: 600-1500.
-BARGE_IN_RMS = int(os.environ.get("JARVIS_BARGE_IN_RMS", "800"))
+BARGE_IN_RMS = int(os.environ.get("HERMES_VOICE_BARGE_IN_RMS", "800"))
 
 # BARGE_IN_BASELINE_RATIO: how much the current mic RMS must exceed the
 # rolling baseline (AI's bleed level) to fire barge-in. 1.0 = same level,
 # 2.5 = 2.5× louder than the bleed. Adapts to your speaker volume.
-BARGE_IN_BASELINE_RATIO = float(os.environ.get("JARVIS_BARGE_IN_BASELINE_RATIO", "2.5"))
+BARGE_IN_BASELINE_RATIO = float(os.environ.get("HERMES_VOICE_BARGE_IN_BASELINE_RATIO", "2.5"))
 
 # BARGE_IN_HOLD_MS: how long the mic RMS must stay above the threshold
 # before barge-in fires. Prevents single-spike false positives.
-BARGE_IN_HOLD_MS = int(os.environ.get("JARVIS_BARGE_IN_HOLD_MS", "200"))
+BARGE_IN_HOLD_MS = int(os.environ.get("HERMES_VOICE_BARGE_IN_HOLD_MS", "200"))
 
 # BARGE_IN_BASELINE_WINDOW: how many frames to average for the bleed baseline.
 # At 50Hz polling, 100 = 2 seconds of history.
-BARGE_IN_BASELINE_WINDOW = int(os.environ.get("JARVIS_BARGE_IN_BASELINE_WINDOW", "100"))
+BARGE_IN_BASELINE_WINDOW = int(os.environ.get("HERMES_VOICE_BARGE_IN_BASELINE_WINDOW", "100"))
 
 # Local VAD energy threshold for normal speech (when TTS is not playing).
 # Server uses the same threshold (300) but our local VAD has the *cleaned*
 # mic which is more sensitive after sidetone cancellation.
-LOCAL_VAD_RMS = int(os.environ.get("JARVIS_LOCAL_VAD_RMS", "400"))
+LOCAL_VAD_RMS = int(os.environ.get("HERMES_VOICE_LOCAL_VAD_RMS", "400"))
 
 
 # ── Device selection ──────────────────────────────────────────────────
@@ -529,9 +529,9 @@ async def run_client() -> None:
     logger.info("Available output devices: %s",
                 {i: d.get("name", "?") for i, d in outputs.items()})
 
-    # Resolve from env vars (JARVIS_INPUT_DEVICE, JARVIS_OUTPUT_DEVICE) or auto-detect
-    env_input = os.environ.get("JARVIS_INPUT_DEVICE")
-    env_output = os.environ.get("JARVIS_OUTPUT_DEVICE")
+    # Resolve from env vars (HERMES_VOICE_INPUT_DEVICE, HERMES_VOICE_OUTPUT_DEVICE) or auto-detect
+    env_input = os.environ.get("HERMES_VOICE_INPUT_DEVICE")
+    env_output = os.environ.get("HERMES_VOICE_OUTPUT_DEVICE")
     input_device = resolve_device(
         int(env_input) if env_input else None,
         "input", inputs, outputs,
@@ -541,7 +541,7 @@ async def run_client() -> None:
         "output", inputs, outputs,
     )
 
-    logger.info("JARVIS Voice Client → %s", WS_URL)
+    logger.info("hermes-voice client → %s", WS_URL)
     if input_device is not None:
         logger.info("Input device: %d (%s)", input_device, inputs.get(input_device, {}).get("name", "?"))
     else:

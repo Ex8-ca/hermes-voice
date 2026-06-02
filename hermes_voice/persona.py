@@ -8,11 +8,12 @@ uses a tight, conversation-focused prompt so the LLM responds in 1-3 seconds.
 Resolution order:
 1. `HERMES_VOICE_PROMPT_FILE` env var (path to a custom prompt file)
 2. `~/.hermes/VOICE.md` (the recommended location for hermes-voice users)
-3. `~/.hermes/SOUL.md` (back-compat with JARVIS Voice Shell)
-4. Generic JARVIS persona (under 100 tokens)
+3. `~/.hermes/SOUL.md` (back-compat with Hermes Voice Shell)
+4. Generic Hermes persona (under 100 tokens)
 
 Optionally tacks on:
 - `~/.hermes/USER.md` (user context — name, preferences, projects)
+- Recent voice memory (last N turns from `voice_memory.md`)
 - Most recent memex8 memories (if memex8 is available)
 
 The result is cached in module state so we only read the file once per process.
@@ -24,19 +25,47 @@ from typing import Optional
 
 logger = logging.getLogger("hermes-voice.persona")
 
+# We import memory lazily to avoid an import cycle (memory doesn't depend on persona,
+# but persona reads memory at request time, and tests reload both modules).
+_memory_module = None
+
+def _get_memory():
+    global _memory_module
+    if _memory_module is None:
+        from hermes_voice import memory
+        _memory_module = memory
+    return _memory_module
+
 _VOICE_PROMPT_CACHE: Optional[str] = None
+_VOICE_PROMPT_CACHE_VERSION = (-1, -1)  # (mtime, size) for cache invalidation when memory changes
 
 
 def _load_voice_prompt() -> str:
-    """Return the voice system prompt (cached after first call)."""
-    global _VOICE_PROMPT_CACHE
-    if _VOICE_PROMPT_CACHE is not None:
+    """Return the voice system prompt (cached after first call, invalidated
+    on memory change via mtime + file size)."""
+    global _VOICE_PROMPT_CACHE, _VOICE_PROMPT_CACHE_VERSION
+    memory = _get_memory()
+
+    # Bump version when the memory file changes (mtime + size, since atomic
+    # rename can preserve mtime across writes)
+    memory_file = memory.VOICE_MEMORY_FILE
+    try:
+        if memory_file.exists():
+            stat = memory_file.stat()
+            current_version = (int(stat.st_mtime), stat.st_size)
+        else:
+            current_version = (0, 0)
+    except OSError:
+        current_version = (0, 0)
+
+    if _VOICE_PROMPT_CACHE is not None and _VOICE_PROMPT_CACHE_VERSION == current_version:
         return _VOICE_PROMPT_CACHE
 
     # Option 1: explicit env var override
     prompt_file = os.getenv("HERMES_VOICE_PROMPT_FILE", "")
     if prompt_file and Path(prompt_file).exists():
         _VOICE_PROMPT_CACHE = Path(prompt_file).read_text(encoding="utf-8")
+        _VOICE_PROMPT_CACHE_VERSION = current_version
         logger.info(f"Voice prompt loaded from {prompt_file} ({len(_VOICE_PROMPT_CACHE)} chars)")
         return _VOICE_PROMPT_CACHE
 
@@ -59,26 +88,36 @@ def _load_voice_prompt() -> str:
         parts.append("\n\n# User Context\n" + user_md.read_text(encoding="utf-8"))
         logger.info(f"Voice prompt: using {user_md}")
 
+    # Recent voice memory (last N turns, for conversational continuity)
+    memory_block = memory.recent_as_prompt()
+    if memory_block:
+        parts.append("\n\n" + memory_block)
+        logger.info(f"Voice prompt: included {len(memory.recent())} recent memory entries")
+
     # memex8 recall (optional, non-fatal if memex8 unavailable)
     memex_block = _try_memex8_recall()
     if memex_block:
         parts.append("\n\n# Recent Memory (from memex8)\n" + memex_block)
         logger.info("Voice prompt: included memex8 recall")
 
+    from hermes_voice.naming import get_assistant_name
+    name = get_assistant_name()
+
     if parts:
         _VOICE_PROMPT_CACHE = (
             "\n\n".join(parts)
-            + "\n\n---\nYou are JARVIS, a concise voice assistant. Keep responses SHORT — under 30 words. "
+            + f"\n\n---\nYou are {name}, a concise voice assistant. Keep responses SHORT — under 30 words. "
             "Conversational, direct, no filler. You are speaking aloud, not typing. "
             "No markdown, no bullet points, no lists. Plain spoken sentences only."
         )
     else:
         # Option 4: generic persona (last-resort fallback)
         _VOICE_PROMPT_CACHE = (
-            "You are JARVIS, a concise voice assistant. Keep responses under 25 words. "
+            f"You are {name}, a concise voice assistant. Keep responses under 25 words. "
             "Speak conversationally, as if out loud. No markdown, no lists, no filler phrases. "
             "Be direct and helpful."
         )
+    _VOICE_PROMPT_CACHE_VERSION = current_version
     logger.info(f"Voice prompt total: {len(_VOICE_PROMPT_CACHE)} chars")
     return _VOICE_PROMPT_CACHE
 
@@ -96,5 +135,6 @@ def _try_memex8_recall(limit: int = 5) -> str:
 
 def reload() -> None:
     """Clear the cache so the next call re-reads the file (useful for tests)."""
-    global _VOICE_PROMPT_CACHE
+    global _VOICE_PROMPT_CACHE, _VOICE_PROMPT_CACHE_VERSION
     _VOICE_PROMPT_CACHE = None
+    _VOICE_PROMPT_CACHE_VERSION = (-1, -1)

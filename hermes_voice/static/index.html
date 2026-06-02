@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JARVIS Voice</title>
+    <title>Hermes Voice</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -60,7 +60,7 @@
             background: #1a1a2e; margin-left: auto;
             border-bottom-right-radius: 4px;
         }
-        .message.jarvis {
+        .message.assistant {
             background: #2a2a3e; border-bottom-left-radius: 4px;
         }
         .message .label { font-size: 0.8rem; color: #888; margin-bottom: 4px; }
@@ -83,7 +83,7 @@
 </head>
 <body>
     <div class="container">
-        <h1>JARVIS <span style="color:#00ff88;font-size:14px;vertical-align:middle;margin-left:8px;font-weight:normal">v2.4</span></h1>
+        <h1>Hermes <span style="color:#00ff88;font-size:14px;vertical-align:middle;margin-left:8px;font-weight:normal">v2.4</span></h1>
         <p style="color: #666; margin-bottom: 20px;">Tap 🎤 and speak — auto-detects when you stop (barge-in enabled)</p>
 
         <div class="status" id="status">Ready</div>
@@ -488,7 +488,7 @@
         wakeWordListen();
 
         // ── Chat with Hermes ──────────────────────────────────────────
-        let conversation = JSON.parse(localStorage.getItem('jarvis_convo') || '[]');
+        let conversation = JSON.parse(localStorage.getItem('hermes_convo') || '[]');
         renderConversation();
 
         async function processText(text, extra = {}) {
@@ -499,7 +499,7 @@
                 const response = await fetch(`/chat?text=${encodeURIComponent(text)}`);
                 const data = await response.json();
 
-                addMessage(data.response, 'jarvis', {
+                addMessage(data.response, 'assistant', {
                     stt_ms: extra.stt_ms || 0,
                     bridge_ms: data.bridge_ms,
                     tts_ms: data.tts_ms,
@@ -525,7 +525,7 @@
 
         function addMessage(text, role, latency = null) {
             conversation.push({ text, role, latency, time: Date.now() });
-            localStorage.setItem('jarvis_convo', JSON.stringify(conversation));
+            localStorage.setItem('hermes_convo', JSON.stringify(conversation));
             renderConversation();
         }
 
@@ -533,7 +533,7 @@
             const container = document.getElementById('conversation');
             container.innerHTML = conversation.map(msg => {
                 let l = '';
-                if (msg.latency && msg.role === 'jarvis') {
+                if (msg.latency && msg.role === 'assistant') {
                     const parts = [];
                     if (msg.latency.stt_ms) parts.push(`STT ${msg.latency.stt_ms}ms`);
                     parts.push(`LLM ${msg.latency.bridge_ms?.toFixed(0) || '?'}ms`);
@@ -541,7 +541,7 @@
                     l = `<div class="latency">⏱ ${parts.join(' → ')}</div>`;
                 }
                 return `<div class="message ${msg.role}">
-                    <div class="label">${msg.role === 'user' ? 'You' : 'JARVIS'}</div>
+                    <div class="label">${msg.role === 'user' ? 'You' : 'Hermes'}</div>
                     <div>${msg.text}</div>${l}
                 </div>`;
             }).join('');
@@ -550,7 +550,7 @@
 
         function clearChat() {
             conversation = [];
-            localStorage.removeItem('jarvis_convo');
+            localStorage.removeItem('hermes_convo');
             document.getElementById('conversation').innerHTML = '';
         }
 
@@ -584,8 +584,8 @@
                 streamingMsgId = 'streaming-' + Date.now();
                 const div = document.createElement('div');
                 div.id = streamingMsgId;
-                div.className = 'message jarvis';
-                div.innerHTML = '<div class="label">JARVIS</div><div class="streaming-text">' + escapeHtml(streamingText) + '<span class="cursor">▊</span></div>';
+                div.className = 'message assistant';
+                div.innerHTML = '<div class="label">Hermes</div><div class="streaming-text">' + escapeHtml(streamingText) + '<span class="cursor">▊</span></div>';
                 container.appendChild(div);
             } else {
                 // Update existing bubble
@@ -610,12 +610,12 @@
                 }
             } else {
                 // No streaming happened (response was cached/instant)
-                addMessage(msg.text, 'jarvis', { bridge_ms: msg.llm_ms || 0 });
+                addMessage(msg.text, 'assistant', { bridge_ms: msg.llm_ms || 0 });
             }
 
             // Save to conversation history
-            conversation.push({ text: streamingText || msg.text, role: 'jarvis', latency: { bridge_ms: msg.llm_ms || 0 }, time: Date.now() });
-            localStorage.setItem('jarvis_convo', JSON.stringify(conversation));
+            conversation.push({ text: streamingText || msg.text, role: 'assistant', latency: { bridge_ms: msg.llm_ms || 0 }, time: Date.now() });
+            localStorage.setItem('hermes_convo', JSON.stringify(conversation));
 
             // Reset streaming state
             streamingMsgId = null;
@@ -627,7 +627,7 @@
             if (streamingMsgId) {
                 const div = document.getElementById(streamingMsgId);
                 if (div) {
-                    div.innerHTML = '<div class="label">JARVIS</div><div style="color:#666;font-style:italic">cancelled</div>';
+                    div.innerHTML = '<div class="label">Hermes</div><div style="color:#666;font-style:italic">cancelled</div>';
                 }
                 streamingMsgId = null;
                 streamingText = '';
