@@ -74,6 +74,19 @@ SIDETONE_DELAY_SAMPLES = AUDIO_SAMPLE_RATE * SIDETONE_DELAY_MS // 1000  # e.g. 1
 # to interrupt. Recommended: 600-1500.
 BARGE_IN_RMS = int(os.environ.get("JARVIS_BARGE_IN_RMS", "800"))
 
+# BARGE_IN_BASELINE_RATIO: how much the current mic RMS must exceed the
+# rolling baseline (AI's bleed level) to fire barge-in. 1.0 = same level,
+# 2.5 = 2.5× louder than the bleed. Adapts to your speaker volume.
+BARGE_IN_BASELINE_RATIO = float(os.environ.get("JARVIS_BARGE_IN_BASELINE_RATIO", "2.5"))
+
+# BARGE_IN_HOLD_MS: how long the mic RMS must stay above the threshold
+# before barge-in fires. Prevents single-spike false positives.
+BARGE_IN_HOLD_MS = int(os.environ.get("JARVIS_BARGE_IN_HOLD_MS", "200"))
+
+# BARGE_IN_BASELINE_WINDOW: how many frames to average for the bleed baseline.
+# At 50Hz polling, 100 = 2 seconds of history.
+BARGE_IN_BASELINE_WINDOW = int(os.environ.get("JARVIS_BARGE_IN_BASELINE_WINDOW", "100"))
+
 # Local VAD energy threshold for normal speech (when TTS is not playing).
 # Server uses the same threshold (300) but our local VAD has the *cleaned*
 # mic which is more sensitive after sidetone cancellation.
@@ -152,11 +165,17 @@ class MicCapture:
     def _on_frame(self, indata: np.ndarray, frames: int, status: sd.CallbackFlags, _):
         if status:
             logger.debug("capture status: %s", status)
+        # Compute RMS on every frame — even when muted — so the barge-in
+        # watcher can compare current level against a running baseline of
+        # the AI's bleed-through. This adapts to your speaker volume and
+        # mic sensitivity automatically.
+        frame_rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
+        self.last_clean_rms = frame_rms
         # Drop frames while TTS is playing — prevents AI's audio from
         # bleeding speakers→mic and being re-transcribed as a new turn.
         if self._muted:
             if not hasattr(self, '_mute_log_last') or time.monotonic() - self._mute_log_last > 2.0:
-                logger.info("mic: frame DROPPED (muted, RMS=%.0f)", np.sqrt(np.mean(indata**2)))
+                logger.info("mic: frame DROPPED (muted, RMS=%.0f)", frame_rms)
                 self._mute_log_last = time.monotonic()
             return
         try:
@@ -181,9 +200,7 @@ class MicCapture:
             pcm = bytes(mic_int16.tobytes())
 
             # Compute RMS for barge-in detection (on cleaned signal)
-            self.last_clean_rms = float(np.sqrt(np.mean(mic_int16.astype(np.float32) ** 2)))
-
-            # Log when frame is sent (rate-limited)
+            # — already set at top of callback, so just log it
             if not hasattr(self, '_send_log_last') or time.monotonic() - self._send_log_last > 2.0:
                 logger.info("mic: frame SENT (RMS=%.0f, muted=%s)", self.last_clean_rms, self._muted)
                 self._send_log_last = time.monotonic()
@@ -576,33 +593,50 @@ async def run_client() -> None:
                         except Exception:
                             break
 
-                # Barge-in watcher: detect user voice on cleaned mic while
-                # AI is speaking. Uses the cleaned mic (post-sidetone-cancellation)
-                # so the AI's own audio doesn't trigger false positives.
+                # Barge-in watcher: detect user voice during AI playback using
+                # baseline-relative RMS. The mic captures both the AI's bleed
+                # and any user speech; user speech creates an RMS spike above
+                # the rolling baseline. Adapts to your speaker volume.
                 async def barge_in_watcher():
                     nonlocal barge_in_fired
+                    import collections
+                    # Rolling window of mic RMS values from the AI's playback
+                    baseline_window = collections.deque(maxlen=BARGE_IN_BASELINE_WINDOW)
+                    above_threshold_since = None  # monotonic time when RMS first exceeded threshold
                     while True:
-                        await asyncio.sleep(0.02)  # poll ~50Hz
+                        await asyncio.sleep(0.02)  # ~50Hz
                         if not server_says_ai_speaking:
                             barge_in_fired = False
+                            above_threshold_since = None
                             continue
                         if barge_in_fired:
                             continue
-                        # Only fire barge-in on the *cleaned* mic RMS
-                        # (after sidetone subtraction, the AI's voice is gone)
-                        # DISABLED: barge-in fires too aggressively — keep TTS flowing
-                        if False and mic.is_sidetoning and mic.last_clean_rms > BARGE_IN_RMS:
-                            barge_in_fired = True
-                            logger.info(
-                                "🚨 Barge-in! clean RMS=%.0f > %d — interrupting AI",
-                                mic.last_clean_rms, BARGE_IN_RMS,
-                            )
-                            try:
-                                await ws.send(json.dumps({"type": "barge_in"}))
-                            except Exception as e:
-                                logger.warning("Failed to send barge_in: %s", e)
-                            # Stop local TTS immediately
-                            speaker.stop_immediately()
+                        current_rms = mic.last_clean_rms
+                        # Update baseline with current reading
+                        baseline_window.append(current_rms)
+                        if len(baseline_window) < 20:  # need at least 0.4s of samples
+                            continue
+                        baseline = sum(baseline_window) / len(baseline_window)
+                        threshold = max(baseline * BARGE_IN_BASELINE_RATIO, BARGE_IN_RMS)
+                        now = time.monotonic()
+                        if current_rms > threshold:
+                            if above_threshold_since is None:
+                                above_threshold_since = now
+                            elif (now - above_threshold_since) * 1000 >= BARGE_IN_HOLD_MS:
+                                barge_in_fired = True
+                                logger.info(
+                                    "🚨 Barge-in! RMS=%.0f > threshold=%.0f (baseline=%.0f × ratio=%.1f), held %.0fms — interrupting AI",
+                                    current_rms, threshold, baseline, BARGE_IN_BASELINE_RATIO,
+                                    (now - above_threshold_since) * 1000,
+                                )
+                                try:
+                                    await ws.send(json.dumps({"type": "barge_in"}))
+                                except Exception as e:
+                                    logger.warning("Failed to send barge_in: %s", e)
+                                # Stop local TTS immediately
+                                speaker.stop_immediately()
+                        else:
+                            above_threshold_since = None
 
                 # Receive server messages + audio
                 async def recv_messages():
