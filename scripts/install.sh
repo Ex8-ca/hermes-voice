@@ -60,7 +60,7 @@ fi
 
 # ── Sanity checks ────────────────────────────────────────────────────
 if [ ! -d "$PLUGIN_SRC" ]; then
-    echo "ERROR: $PLUGIN_SRC not found. Run from inside the jarvis-voice-shell repo." >&2
+    echo "ERROR: $PLUGIN_SRC not found. Run from inside the hermes-voice repo." >&2
     exit 1
 fi
 

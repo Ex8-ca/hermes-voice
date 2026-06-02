@@ -1,14 +1,14 @@
 [Unit]
-Description=JARVIS Voice Client
+Description=Hermes Voice Client
 After=network.target pipewire.service pulseaudio.service
-Documentation=https://github.com/Ex8-ca/jarvis-voice-shell
+Documentation=https://github.com/Ex8-ca/hermes-voice
 
 [Service]
 Type=simple
 # Adjust these paths to match your install
 Environment=HOME=/home/%u
-WorkingDirectory=/home/%u/jarvis-voice-shell
-ExecStart=/home/%u/jarvis-voice-shell/venv/bin/python /home/%u/jarvis-voice-shell/jarvis_voice_client.py
+WorkingDirectory=/home/%u/hermes-voice
+ExecStart=/home/%u/hermes-voice/venv/bin/python /home/%u/hermes-voice/jarvis_voice_client.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

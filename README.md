@@ -1,8 +1,8 @@
-# JARVIS Voice Shell
+# hermes-voice
 
-Real-time voice pipeline for AI assistants. Streaming STT → streaming LLM → streaming TTS, with filler phrases that mask latency and a wake-word-free always-on mic. Runs in two modes: single-machine (mic + STT + LLM + TTS in one box, web UI in your browser) or split (mic on one machine, STT/LLM/TTS on another over WebSocket).
+Real-time voice pipeline for Hermes Agent. Streaming STT → streaming LLM → streaming TTS, with filler phrases that mask latency and a wake-word-free always-on mic. Runs in two modes: single-machine (mic + STT + LLM + TTS in one box, web UI in your browser) or split (mic on one machine, STT/LLM/TTS on another over WebSocket).
 
-> JARVIS is used here as an assistant-style project name. This project is not affiliated with Marvel, Disney, OpenAI, Microsoft, or Nous Research.
+> Hermes is the assistant name used here. The legacy "JARVIS" naming survives in some file paths and the `jarvis-voice` CLI entry point (for the push-to-talk mode); the web UI, plugin, and docs use Hermes.
 
 ## What you get
 
@@ -50,7 +50,7 @@ This is what I use: `.2` is my laptop (mic + speakers), `.3` is a server in the 
 ## Repository layout
 
 ```
-jarvis-voice-shell/
+hermes-voice/
 ├── web/
 │   └── jarvis_web.py            FastAPI web UI + WebSocket gateway. Both modes share this.
 │                                  1330 lines. Browser-facing HTML/JS embedded.
@@ -102,8 +102,8 @@ jarvis-voice-shell/
 ## Quickstart — single-machine, Docker (easiest)
 
 ```bash
-git clone https://github.com/Ex8-ca/jarvis-voice-shell.git
-cd jarvis-voice-shell
+git clone https://github.com/Ex8-ca/hermes-voice.git
+cd hermes-voice
 
 cp .env.example .env
 # Edit .env and set GROQ_API_KEY=gsk_... (or DEEPSEEK_API_KEY / OPENAI_API_KEY)
@@ -114,6 +114,18 @@ open http://localhost:8989
 ```
 
 For GPU acceleration: `docker compose build --build-arg TARGET=gpu` (requires `nvidia-container-toolkit`).
+
+## Quickstart — install as a Hermes plugin
+
+```bash
+hermes plugins install Ex8-ca/hermes-voice
+hermes plugins enable hermes-voice
+hermes gateway restart
+
+open http://localhost:8989
+```
+
+The plugin auto-starts the voice server on load. Use `/hermes-voice start|stop|restart|status` from any Hermes session.
 
 ## Quickstart — single-machine, manual
 
@@ -152,8 +164,8 @@ The Web UI on `:8989` is also the gateway — clients connect to it via WebSocke
 ### On the desktop (mic + speakers)
 
 ```bash
-git clone https://github.com/Ex8-ca/jarvis-voice-shell.git
-cd jarvis-voice-shell
+git clone https://github.com/Ex8-ca/hermes-voice.git
+cd hermes-voice
 pip install -r requirements-client.txt
 
 # Point at the server

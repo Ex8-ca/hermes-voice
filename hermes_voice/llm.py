@@ -96,7 +96,7 @@ async def stream_chat(
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {key}" if key else "Bearer not-needed",
-        "User-Agent": "hermes-voice/0.1 (+https://github.com/Ex8-ca/jarvis-voice-shell)",
+        "User-Agent": "hermes-voice/0.1 (+https://github.com/Ex8-ca/hermes-voice)",
     }
     payload = {
         "model": model,

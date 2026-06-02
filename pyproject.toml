@@ -3,14 +3,14 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jarvis-voice-shell"
+name = "hermes-voice"
 version = "0.1.0"
-description = "Realtime push-to-talk voice shell for Hermes AI Agent — JARVIS edition"
+description = "Real-time voice pipeline for Hermes Agent — streaming STT, LLM, and TTS with browser UI"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-authors = [{name = "JARVIS Voice Shell contributors"}]
-keywords = ["voice", "tts", "stt", "hermes", "jarvis", "realtime"]
+authors = [{name = "hermes-voice contributors"}]
+keywords = ["voice", "tts", "stt", "hermes", "realtime"]
 
 dependencies = [
     "edge-tts>=6.1.0",

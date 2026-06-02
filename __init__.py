@@ -2,7 +2,7 @@
 
 When a user installs this plugin via::
 
-    hermes plugins install Ex8-ca/jarvis-voice-shell
+    hermes plugins install Ex8-ca/hermes-voice
 
 The FastAPI voice server starts automatically (if not already running)
 and voice tools are registered with Hermes.

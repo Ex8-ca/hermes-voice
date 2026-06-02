@@ -1,4 +1,4 @@
-# JARVIS Voice Shell — Docker Compose
+# hermes-voice — Docker Compose
 # Brings up: web UI (port 8989) + whisper server (port 9001)
 # Choose CPU or GPU variant with --build-arg TARGET=cpu|gpu
 
@@ -8,8 +8,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: ${TARGET:-cpu}    # cpu (default) or gpu
-    image: jarvis-whisper:latest
-    container_name: jarvis-whisper
+    image: hermes-voice-whisper:latest
+    container_name: hermes-voice-whisper
     command: ["python", "whisper-server/server.py"]
     ports:
       - "9001:9001"
@@ -32,13 +32,13 @@ services:
       context: .
       dockerfile: Dockerfile
       target: base
-    image: jarvis-web:latest
-    container_name: jarvis-web
-    command: ["uvicorn", "web.jarvis_web:app", "--host", "0.0.0.0", "--port", "8989"]
+    image: hermes-voice-web:latest
+    container_name: hermes-voice-web
+    command: ["uvicorn", "hermes_voice.gateway:app", "--host", "0.0.0.0", "--port", "8989"]
     ports:
       - "8989:8989"
     volumes:
-      - tts-cache:/root/.cache/jarvis-voice-shell/tts_cache
+      - tts-cache:/root/.cache/hermes-voice/tts_cache
     env_file: .env
     environment:
       - WHISPER_URL=http://whisper:9001/v1/audio/transcriptions
