@@ -54,3 +54,9 @@ nul
 # Hermes/local runtime state
 .hermes/
 *.session
+
+# Built distribution artifacts
+client-pkg/dist/
+client-pkg/build/
+*.egg-info/
+
