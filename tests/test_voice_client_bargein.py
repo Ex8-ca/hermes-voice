@@ -12,8 +12,12 @@ import time
 import threading
 import numpy as np
 
-# Make the parent dir importable
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Make the parent dir + the hermes-voice plugin dir importable
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
+# `hermes-voice/` is a directory inside the repo root, so we need to import
+# it as a package. Add the repo root to sys.path so `hermes_voice` resolves.
+# The plugin's __init__.py makes it a proper package.
 
 # Skip if sounddevice isn't installed (e.g. CI on macOS without audio)
 try:
@@ -22,7 +26,13 @@ except ImportError:
     print("sounddevice not installed — skipping")
     sys.exit(0)
 
-from jarvis_voice_client import TTSRefBuffer, SIDETONE_DELAY_SAMPLES, BARGE_IN_RMS
+# Plugin refactor: client.py now lives inside the hermes-voice plugin directory.
+# Support both the new location and the legacy repo-root location.
+try:
+    from hermes_voice.client import TTSRefBuffer, SIDETONE_DELAY_SAMPLES, BARGE_IN_RMS
+except ImportError:
+    # Back-compat: pre-plugin layout had jarvis_voice_client.py at the repo root.
+    from jarvis_voice_client import TTSRefBuffer, SIDETONE_DELAY_SAMPLES, BARGE_IN_RMS
 
 
 def test_tts_ref_buffer_fifo():
