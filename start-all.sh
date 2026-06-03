@@ -20,16 +20,19 @@ else
     PYTHON=python3
 fi
 
-# Whisper STT server — use the distil-large-v3 model by default. Distil is
-# trained for conversational/short audio, so it hallucinates far less on
-# voice commands than the large-v3-turbo default. Override with
-# WHISPER_MODEL=large-v3-turbo if you need higher accuracy on long dictation.
-WHISPER_MODEL="${WHISPER_MODEL:-Systran/faster-distil-whisper-large-v3}"
+# Whisper STT server — use the original (non-distil) turbo model by default.
+# Distil hallucinates less but is slower on CPU. The non-distil turbo with
+# int8 quantization is faster and was the model that worked reliably before
+# the nvidia driver crash. Override with WHISPER_MODEL=... if needed.
+WHISPER_MODEL="${WHISPER_MODEL:-mobiuslabsgmbh/faster-whisper-large-v3-turbo}"
+WHISPER_COMPUTE_TYPE="${WHISPER_COMPUTE_TYPE:-int8}"
+WHISPER_BEAM_SIZE="${WHISPER_BEAM_SIZE:-1}"
 WHISPER_PORT="${WHISPER_PORT:-9001}"
 WHISPER_SCRIPT="${WHISPER_SCRIPT:-/home/marc/whisper-server/server.py}"
 
-echo "Starting Whisper STT server (model=$WHISPER_MODEL) on :$WHISPER_PORT..."
+echo "Starting Whisper STT server (model=$WHISPER_MODEL, compute=$WHISPER_COMPUTE_TYPE, beam=$WHISPER_BEAM_SIZE) on :$WHISPER_PORT..."
 WHISPER_MODEL="$WHISPER_MODEL" WHISPER_PORT="$WHISPER_PORT" \
+    WHISPER_COMPUTE_TYPE="$WHISPER_COMPUTE_TYPE" WHISPER_BEAM_SIZE="$WHISPER_BEAM_SIZE" \
     python3 "$WHISPER_SCRIPT" > /tmp/whisper.log 2>&1 &
 WHISPER_PID=$!
 trap "kill $WHISPER_PID 2>/dev/null" EXIT

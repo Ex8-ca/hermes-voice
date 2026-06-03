@@ -352,7 +352,7 @@ async def voice_websocket(ws: WebSocket):
     vad = EnergyVAD(
         energy_threshold=_vad_threshold,
         start_frames=3,
-        end_silence_frames=5,   # 5 × 63ms = 315ms silence (was 11 = 693ms)
+        end_silence_frames=25,  # 25 × 63ms = 1575ms silence before Whisper fires
         pre_roll_frames=5,
     )
 
@@ -605,10 +605,12 @@ async def voice_websocket(ws: WebSocket):
                 pass
 
         if not transcript:
+            logger.warning("STT returned EMPTY transcript for %d bytes of audio", len(audio_data))
             await ws.send_json({"type": "error", "text": "No speech detected"})
             processing = False
             return
 
+        logger.info(f"STT transcript: {transcript!r}")
         stt_ms = (time.perf_counter() - t0) * 1000
         await ws.send_json({"type": "transcript", "text": transcript, "stt_ms": stt_ms})
 
