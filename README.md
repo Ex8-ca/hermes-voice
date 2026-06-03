@@ -100,6 +100,48 @@ hermes-voice/
 └── Start-JARVIS*.bat            Windows launchers (Hermes, PTT, OpenAI variants)
 ```
 
+## Prerequisites
+
+**One Python venv. One LLM API key. Optional GPU.** That's the whole list.
+
+| What | Why | Notes |
+|---|---|---|
+| **Python 3.10+** | Runs the gateway + Whisper server | `python3 --version` to check |
+| **LLM API key** | Real-time responses | Free: [Groq](https://console.groq.com/keys) · Cheap: [DeepSeek](https://platform.deepseek.com/) · Any OpenAI-compatible URL |
+| **Whisper** (local) | Speech-to-text without sending audio to the cloud | Runs on your CPU or GPU; bundled `whisper-server/server.py` |
+| **Edge TTS** | Text-to-speech | Free, runs in the cloud (Microsoft), no key needed |
+| **GPU (optional)** | Faster Whisper (~30x realtime vs ~1x) | Any NVIDIA 8GB+ works. Apple Silicon works too. CPU is fine, just slower. |
+
+> **Don't run `pip install` manually.** Run `./bootstrap.sh` instead — it picks the right deps, sets up the venv, and starts Whisper. See the [Quickstart](#quickstart) below.
+
+### System packages (Linux only)
+
+The Python wheels cover almost everything, but a few C libraries need apt/dnf/pacman:
+
+```bash
+# Debian/Ubuntu
+sudo apt install -y python3-dev portaudio19-dev libasound2-dev ffmpeg
+
+# Fedora
+sudo dnf install -y python3-devel portaudio-devel alsa-lib-devel ffmpeg
+
+# Arch
+sudo pacman -S python portaudio alsa-lib ffmpeg
+```
+
+`portaudio` is for the desktop mic client (split-architecture mode). `ffmpeg` is for Whisper to read non-WAV audio. The web UI doesn't need either.
+
+## Quickstart — pick your path
+
+| Path | Best for | Time |
+|---|---|---|
+| **[A. Docker](#quickstart--single-machine-docker-easiest)** | Don't want to touch Python at all | 2 min |
+| **[B. Plugin (recommended for Hermes users)](#quickstart--install-as-a-hermes-plugin)** | You already run Hermes Agent | 3 min |
+| **[C. Manual (no Docker, no plugin)](#quickstart--single-machine-manual)** | Want full control, no abstraction | 5 min |
+| **[D. Split architecture](#quickstart--split-architecture)** | Mic on desktop, voice on a server | 10 min |
+
+---
+
 ## Quickstart — single-machine, Docker (easiest)
 
 ```bash
@@ -118,65 +160,126 @@ For GPU acceleration: `docker compose build --build-arg TARGET=gpu` (requires `n
 
 ## Quickstart — install as a Hermes plugin
 
-```bash
-hermes plugins install Ex8-ca/hermes-voice
-hermes plugins enable hermes-voice
-hermes gateway restart
+**Three commands. The plugin manages the server; you just chat.**
 
-open http://localhost:8989
+```bash
+# 1. Install the plugin
+hermes plugins install Ex8-ca/hermes-voice
+
+# 2. Run the one-time dependency installer (creates venv, installs Whisper, etc.)
+#    The first time, this downloads ~1.5GB of Whisper model weights.
+cd ~/.hermes/plugins/hermes-voice && ./bootstrap.sh
+
+# 3. Start the voice server (any chat — Telegram, Discord, CLI)
+#    In a Hermes session, send:
+/hermes-voice start
 ```
 
-The plugin auto-starts the voice server on load. Use `/hermes-voice start|stop|restart|status` from any Hermes session.
+Then open **http://localhost:8989** in your browser. Grant mic permission, talk.
+
+### What each step does
+
+| Step | What it actually does | Skip if… |
+|---|---|---|
+| `hermes plugins install` | `git clone` into `~/.hermes/plugins/hermes-voice/`, generates `.env` from `.env.example` | already installed? run `hermes plugins update hermes-voice` |
+| `./bootstrap.sh` | Creates Python venv, installs `faster-whisper` + `edge-tts` + `ctranslate2`, sets up `whisper-server`, writes `WHISPER_URL` to `.env`, downloads the default model | you already have a working venv + Whisper on a port |
+| `/hermes-voice start` | Spawns the gateway in the background on port 7979 (or `HERMES_VOICE_PORT` if you set one) | you set up a systemd service to start it on boot |
+
+> **Default port is 7979, not 8989.** Port 8989 is owned by `audioforge` on the reference host. If 8989 is free on your machine, set `HERMES_VOICE_PORT=8989` in `.env` before starting.
+
+### Verify it worked
+
+```bash
+curl http://localhost:7979/health
+```
+
+Should return:
+```json
+{"status": "ok", "uptime_s": 12.3, "whisper": "ok", "whisper_url": "...", "port": 7979, "tier": "gpu", "version": "0.1.0"}
+```
+
+Or from any chat: `/hermes-voice status` returns a multi-line version of the same.
+
+### Common install problems
+
+| Error in the logs | Fix |
+|---|---|
+| `ModuleNotFoundError: No module named 'faster_whisper'` | `cd ~/.hermes/plugins/hermes-voice && ./bootstrap.sh` |
+| `Whisper not reachable at http://127.0.0.1:9001` | Same — `bootstrap.sh` starts it for you |
+| `port 7979 already in use` | Set `HERMES_VOICE_PORT=7978` (or any free port) in `.env` |
+| `ImportError: libcudart.so` (GPU) | `pip install --upgrade ctranslate2` (the plugin does this) |
+| `/hermes-voice` doesn't appear in chat | Restart the gateway: `hermes gateway restart` |
+
+### Updating
+
+```bash
+cd ~/.hermes/plugins/hermes-voice
+git pull                       # (rare — usually `hermes plugins update` does this)
+./bootstrap.sh                 # picks up any new requirements
+/hermes-voice restart          # reload gateway with new code
+```
+
+### What the plugin auto-registers
+
+- **Tool:** `hermes_voice_status` — agent can check if voice is healthy before sending a voice reply
+- **Slash command:** `/hermes-voice start|stop|restart|status [port]` — works in every connected chat
+- **Auto-start:** gateway spawns when Hermes loads the plugin, no extra action needed
+- **Health endpoint:** `GET /health` returns JSON for monitoring scripts
 
 ## Quickstart — single-machine, manual
 
+If you're not using Docker and not using the plugin, do this:
+
 ```bash
-python -m venv venv && source venv/bin/activate
-pip install -r requirements-web.txt -r requirements-whisper.txt
+git clone https://github.com/Ex8-ca/hermes-voice.git
+cd hermes-voice
 
-cp .env.example .env
-# Edit .env with your LLM key
+# The one-shot installer handles Python deps, venv, Whisper, and .env
+./bootstrap.sh
 
-# Terminal 1: Whisper STT server
-python whisper-server/server.py
+# (Optional) download the Whisper model now so first run is fast
+./bootstrap.sh --download-model
 
-# Terminal 2: Web UI + gateway
-uvicorn web.jarvis_web:app --host 0.0.0.0 --port 8989
+# Edit .env and set your LLM key (Groq is free, see link in Prerequisites)
+# Then start everything:
+./start-all.sh
 
 # Browser
 open http://localhost:8989
 ```
+
+`bootstrap.sh` is idempotent — run it again any time to update deps. Use `./bootstrap.sh --with-client` if you also want the Python desktop mic client.
 
 ## Quickstart — split architecture
 
 ### On the server (Whisper + LLM + TTS)
 
 ```bash
-pip install -r requirements-web.txt -r requirements-whisper.txt
-cp .env.example .env
-# Set GROQ_API_KEY=***
+git clone https://github.com/Ex8-ca/hermes-voice.git
+cd hermes-voice
+./bootstrap.sh              # venv + Whisper + deps
+# Edit .env and set GROQ_API_KEY=gsk_...
 
-python whisper-server/server.py &
-uvicorn web.jarvis_web:app --host 0.0.0.0 --port 8989
+./start-all.sh              # starts Whisper + gateway on :7979 (or HERMES_VOICE_PORT)
 ```
 
-The Web UI on `:8989` is also the gateway — clients connect to it via WebSocket.
+The Web UI on `HERMES_VOICE_PORT` (default 7979) is also the gateway — clients connect to it via WebSocket.
 
 ### On the desktop (mic + speakers)
 
 ```bash
 git clone https://github.com/Ex8-ca/hermes-voice.git
 cd hermes-voice
-pip install -r requirements-client.txt
+./bootstrap.sh --with-client   # adds sounddevice + websockets to the same venv
 
 # Point at the server
-export JARVIS_WS_HOST=192.168.1.50
-export JARVIS_WS_PORT=8989
+export HERMES_WS_HOST=192.168.1.50
+export HERMES_WS_PORT=7979
 
-python jarvis_voice_client.py
+python -m hermes_voice.client
 ```
 
-For Linux: `systemd/jarvis-voice-client.service` is a drop-in unit. Set `JARVIS_WS_HOST` in the unit's `Environment=` and enable it.
+For Linux: `systemd/jarvis-voice-client.service` is a drop-in unit. Set `HERMES_WS_HOST` in the unit's `Environment=` and enable it.
 
 ## LLM provider priority
 

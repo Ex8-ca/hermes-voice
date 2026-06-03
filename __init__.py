@@ -26,6 +26,18 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger("hermes-voice.plugin")
 
+import importlib  # noqa: E402  (after logger to keep import order tidy)
+
+
+def _try_import(name: str) -> bool:
+    """Best-effort import check. Used by register() to distinguish
+    'no Python deps' from 'deps OK, Whisper down' in the auto-start error."""
+    try:
+        importlib.import_module(name)
+        return True
+    except ImportError:
+        return False
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -347,8 +359,34 @@ def register(ctx) -> None:
     #    If it fails to start, tools are still registered — user can
     #    start manually with /hermes-voice start.
     try:
-        start_server(quiet=True)
+        started = start_server(quiet=True)
     except Exception as e:
-        logger.warning("hermes-voice server auto-start failed (start manually with /hermes-voice start): %s", e)
+        logger.warning("hermes-voice server auto-start failed: %s", e)
+        started = False
+
+    if not started and not _is_server_responding(DEFAULT_PORT):
+        # Distinguish "no Python deps" (import failed) from "deps OK but
+        # no Whisper" (different fix). The latter is recoverable with
+        # ./bootstrap.sh; the former needs pip install.
+        deps = ["fastapi", "uvicorn", "httpx", "faster_whisper", "edge_tts"]
+        missing = [d for d in deps if not _try_import(d)]
+        if missing:
+            logger.warning(
+                "hermes-voice: missing Python deps: %s\n"
+                "  Fix: cd %s && pip install -r requirements-whisper.txt -r requirements-web.txt\n"
+                "  Or:  ./bootstrap.sh   (does this and more)",
+                ", ".join(missing), _get_plugin_dir(),
+            )
+        else:
+            # Deps present but server didn't come up — most likely Whisper
+            # isn't reachable. That's a separate problem with its own fix.
+            whisper_url = os.environ.get("WHISPER_URL", "http://127.0.0.1:9001/v1/audio/transcriptions")
+            logger.warning(
+                "hermes-voice: Python deps look OK but the server didn't start.\n"
+                "  Most common cause: Whisper not reachable at %s\n"
+                "  Fix:  ./bootstrap.sh          (installs + starts whisper-server)\n"
+                "  Or:   /hermes-voice status    (see what /health says)",
+                whisper_url,
+            )
 
     logger.info("hermes-voice plugin registered (tool + slash command + auto-start)")
