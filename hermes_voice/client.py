@@ -28,6 +28,27 @@ import asyncio
 import collections
 import json
 import logging
+
+# Load .env from the repo root, the script dir, or ~/.hermes/.env — same lookup
+# the gateway uses, so a single .env file works for both sides of a split setup.
+try:
+    from dotenv import load_dotenv, find_dotenv
+    _client_env = find_dotenv(usecwd=True) or ""
+    if _client_env:
+        load_dotenv(_client_env, override=False)
+    else:
+        # Fall back to gateway.py's own lookup
+        import os as _os, pathlib as _pl
+        for _candidate in [
+            _pl.Path(__file__).resolve().parent.parent / ".env",
+            _pl.Path.cwd() / ".env",
+            _pl.Path.home() / ".hermes" / ".env",
+        ]:
+            if _candidate.is_file():
+                load_dotenv(_candidate, override=False)
+                break
+except ImportError:
+    pass  # python-dotenv not installed — env vars must be set in the shell
 import os
 import queue
 import signal
