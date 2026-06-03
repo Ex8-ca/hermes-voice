@@ -837,9 +837,10 @@ async def health():
 
     # Best-effort tier detection from a marker file start-all.sh may leave.
     # Format: just a single word on the first line ("gpu", "cpu", "apple").
+    # Use the OS-appropriate temp dir so this works on Linux, macOS, and Windows.
     tier = ""
     try:
-        marker = Path("/tmp/hermes-voice-tier")
+        marker = Path(tempfile.gettempdir()) / "hermes-voice-tier"
         if marker.exists():
             tier = marker.read_text().strip().splitlines()[0].strip()
     except Exception:

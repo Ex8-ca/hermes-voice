@@ -106,7 +106,10 @@ hermes-voice/
 ├── start-all.sh                 Launches Whisper + gateway together (server side)
 ├── run.sh                       Just the gateway (server side)
 ├── bootstrap.sh                 Server-side install: venv + Whisper deps + ctranslate2
-├── bootstrap-client.sh          Client-side install: venv + 5 small packages, no Whisper
+├── bootstrap-client.sh          Client-side install (Linux/macOS): venv + 5 small packages, no Whisper
+├── bootstrap-client.ps1         Client-side install (Windows PowerShell)
+├── start-voice-client.ps1       Windows client launcher (uses venv python)
+├── Start-Hermes-Voice-Client.bat   Windows .bat launcher (double-click to run)
 ```
 
 ## Prerequisites
@@ -153,6 +156,7 @@ sudo pacman -S python portaudio alsa-lib ffmpeg
 | **[B. Plugin (recommended for Hermes users)](#quickstart--install-as-a-hermes-plugin)** | You already run Hermes Agent | 3 min |
 | **[C. Manual (no Docker, no plugin)](#quickstart--single-machine-manual)** | Want full control, no abstraction | 5 min |
 | **[D. Split architecture](#quickstart--split-architecture)** | Mic on desktop, voice on a server | 10 min |
+| **[E. Windows client](#windows)** | Mic on Windows, voice on a Linux server | 5 min |
 
 ---
 
@@ -380,6 +384,121 @@ systemctl --user enable --now jarvis-voice-client
 loginctl enable-linger marc   # keep it running after logout
 ```
 
+## Windows
+
+> **Almost everything works on Windows.** The voice client, the gateway, and
+> even GPU Whisper all run on Windows 10/11. The one thing that doesn't is
+> the **Hermes plugin install** — that's Linux/macOS only because it expects
+> `$HOME/.hermes/` and bash. So if you're using the plugin to start the
+> gateway, run it on Linux. If you want a fully-Windows stack, start the
+> gateway directly with uvicorn (see "Server on Windows" below).
+
+### What works on Windows
+
+| Component | Status | Notes |
+|---|---|---|
+| Voice client (`hermes_voice.client`) | ✅ Full support | Pre-built `sounddevice` wheels for Python 3.10-3.13 x64/ARM64. PortAudio is bundled — no system library install needed. |
+| Gateway (`hermes_voice.gateway`) | ✅ Works | Same uvicorn + FastAPI stack as Linux. |
+| Whisper GPU (RTX 5080 etc.) | ✅ Works on Windows | `ctranslate2` ships Windows CUDA wheels; install CUDA 12.x + cuDNN 8 and use `WHISPER_COMPUTE_TYPE=float16`. |
+| Hermes plugin install | ❌ Linux/macOS | The plugin system assumes `$HOME/.hermes/` and bash. |
+
+### Install (Windows client)
+
+**Prerequisites:** Python 3.10+ from [python.org](https://www.python.org/downloads/) (tick **"Add Python to PATH"** during install) or `winget install Python.Python.3.13`. PowerShell 5.1+ ships with Windows 10/11.
+
+```powershell
+git clone https://github.com/Ex8-ca/hermes-voice.git
+cd hermes-voice
+.\bootstrap-client.ps1 192.168.1.3 7979
+# (host and port are the server's IP and HERMES_VOICE_PORT)
+# Prompts for GROQ_API_KEY — same key the server uses.
+```
+
+`bootstrap-client.ps1` creates a venv, installs the 5 client packages, writes
+`.env` with `chmod`-equivalent ACLs (locked to your user account), and verifies
+the import. Idempotent — safe to re-run.
+
+If PowerShell blocks the script (default on fresh Windows), run it with
+`-ExecutionPolicy Bypass`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bootstrap-client.ps1 192.168.1.3 7979
+```
+
+### Run (Windows client)
+
+```powershell
+# From the repo dir
+.\start-voice-client.ps1
+
+# Or use the launcher with options:
+.\start-voice-client.ps1 -ListDevices       # print audio devices and exit
+.\start-voice-client.ps1 -InputDevice 5     # force a specific input device
+.\start-voice-client.ps1 -Headless          # quieter logs (warnings only)
+
+# Or run the venv python directly:
+.\venv\Scripts\python.exe -m hermes_voice.client
+```
+
+You should see:
+
+```
+Starting hermes-voice client
+  Target: ws://192.168.1.3:7979/ws
+  Press Ctrl+C to stop.
+
+[INFO] hermes-voice-client: hermes-voice client → ws://192.168.1.3:7979/ws
+[INFO] hermes-voice-client: WebSocket connected
+[INFO] hermes-voice-client: mic: frame SENT (RMS=0, muted=False)
+```
+
+Speak into the mic. `RMS=` should jump from 0 to 200-2000+ while you talk,
+and you'll hear the AI's response through your default speaker.
+
+### Picking the right audio device
+
+Windows often has multiple input devices (laptop mic, webcam, USB headset,
+realtek analog, virtual audio cable). The "default" can change after
+rebooting or plugging in a USB device. Force a specific one:
+
+```powershell
+.\start-voice-client.ps1 -ListDevices
+# Look at the 'name' and 'index' columns.
+
+# Force device 5:
+.\start-voice-client.ps1 -InputDevice 5
+# Or permanently: add HERMES_VOICE_INPUT_DEVICE=5 to .env
+```
+
+### Server on Windows (advanced)
+
+You can run the whole stack on Windows without WSL2, with GPU acceleration.
+The flow is the same as Linux but launched from PowerShell instead of bash.
+
+**Prerequisites:** CUDA 12.x and cuDNN 8 installed (download from NVIDIA's
+site, or use `winget install NVIDIA.CUDA`). Python 3.10+.
+
+```powershell
+# Server side, same repo
+git clone https://github.com/Ex8-ca/hermes-voice.git
+cd hermes-voice
+py -3.13 -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements-whisper.txt
+pip install -r requirements-web.txt
+
+# GPU mode (default)
+$env:WHISPER_COMPUTE_TYPE = "float16"
+.\venv\Scripts\python.exe -m uvicorn hermes_voice.gateway:app --host 0.0.0.0 --port 7979
+```
+
+For **CPU-only** (no NVIDIA GPU, or just trying things out), set
+`$env:WHISPER_COMPUTE_TYPE = "int8"` before launching. Expect ~9-12s per 1s
+of audio — fine for development, painful for daily use.
+
+There's no `bootstrap.ps1` for the server side yet (contributions welcome).
+For now the manual `pip install` + `uvicorn` invocation is what you get.
+
 ## LLM provider priority
 
 The gateway picks the first LLM with a key set in `.env`:
@@ -566,16 +685,26 @@ The gateway also reads `~/.hermes/SOUL.md` and `~/.hermes/USER.md` automatically
 ### Client: `ModuleNotFoundError: No module named 'sounddevice'`
 
 The venv has numpy, websockets, and python-dotenv, but `sounddevice` and
-`miniaudio` failed to install. **Most common cause:** missing PortAudio headers.
+`miniaudio` failed to install. **On Linux, the most common cause is missing
+PortAudio headers.** On Windows this almost never happens — pre-built wheels
+are on PyPI.
 
 ```bash
-sudo apt install -y libportaudio2 portaudio19-dev libasound2-dev   # Debian/Ubuntu
-sudo dnf install -y portaudio portaudio-devel alsa-lib-devel       # Fedora
-sudo pacman -S portaudio alsa-lib                                 # Arch
+# Linux (Debian/Ubuntu)
+sudo apt install -y libportaudio2 portaudio19-dev libasound2-dev
+# Fedora
+sudo dnf install -y portaudio portaudio-devel alsa-lib-devel
+# Arch
+sudo pacman -S portaudio alsa-lib
 ```
 
-Then re-run `./bootstrap-client.sh` — it's idempotent. The two packages will
-compile against the headers and install cleanly.
+Then re-run the bootstrap script (`.sh` on Linux/macOS, `.ps1` on Windows) —
+both are idempotent. The two packages will compile against the headers and
+install cleanly.
+
+If `sounddevice` still fails on Linux after installing the headers, check
+that you have a C compiler (`sudo apt install -y build-essential python3-dev`)
+and re-run.
 
 ### Client: `hermes-voice client → ws://127.0.0.1:8989/ws` (ignoring your .env)
 
