@@ -1,7 +1,7 @@
 """
 Multi-provider LLM dispatcher for the hermes-voice plugin.
 
-Provider priority: Groq → DeepSeek → OpenAI → Local → Hermes
+Provider priority: DeepSeek → Groq → OpenAI → Local → Hermes
 The first provider with a configured key wins.
 
 All providers speak OpenAI-compatible /v1/chat/completions, so the call shape
@@ -25,15 +25,15 @@ logger = logging.getLogger("hermes-voice.llm")
 
 # ── Provider configuration (env-driven) ──────────────────────────────
 
-# Groq — fastest, has free tier, ~150ms first token
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_URL = os.getenv("GROQ_URL", "https://api.groq.com/openai/v1/chat/completions")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-
 # DeepSeek — high quality, pay-per-token, ~500ms first token
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_URL = os.getenv("DEEPSEEK_URL", "https://api.deepseek.com/v1/chat/completions")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+
+# Groq — fastest, has free tier, ~150ms first token
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_URL = os.getenv("GROQ_URL", "https://api.groq.com/openai/v1/chat/completions")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 # OpenAI — reliable, expensive, ~600ms first token
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -50,17 +50,22 @@ HERMES_URL = os.getenv("HERMES_URL", "http://127.0.0.1:6789/v1/chat/completions"
 HERMES_API_KEY = os.getenv("HERMES_API_KEY", "")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "deepseek-chat")
 
+# Hermes deep path (full agent loop on 6789). Used when voice_primary
+# returns [[DEEP_QUERY]] (needs tools, memory, or web search).
+HERMES_DEEP_URL = os.getenv("HERMES_DEEP_URL", HERMES_URL)
+HERMES_DEEP_KEY = os.getenv("HERMES_DEEP_KEY", "chillygeek6789")
+
 
 def pick_llm() -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """Return (url, key, model, name) for the first available LLM provider.
 
-    Priority: Groq → DeepSeek → OpenAI → Local → Hermes
+    Priority: DeepSeek → Groq → OpenAI → Local → Hermes
     Returns (None, None, None, None) if no provider is configured.
     """
-    if GROQ_API_KEY:
-        return GROQ_URL, GROQ_API_KEY, GROQ_MODEL, "Groq"
     if DEEPSEEK_API_KEY:
         return DEEPSEEK_URL, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, "DeepSeek"
+    if GROQ_API_KEY:
+        return GROQ_URL, GROQ_API_KEY, GROQ_MODEL, "Groq"
     if OPENAI_API_KEY:
         return OPENAI_URL, OPENAI_API_KEY, OPENAI_MODEL, "OpenAI"
     if LOCAL_LLM_URL:
@@ -70,14 +75,28 @@ def pick_llm() -> Tuple[Optional[str], Optional[str], Optional[str], Optional[st
     return None, None, None, None
 
 
+def pick_deep_llm() -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Return (url, key, model, name) for the 'deep' Hermes endpoint.
+
+    Used when voice_primary returns [[DEEP_QUERY]] and needs full tool/memory
+    access. Falls back to HERMES_URL / HERMES_API_KEY if the deep-specific
+    env vars aren't set.
+    """
+    url = HERMES_DEEP_URL or HERMES_URL
+    key = HERMES_DEEP_KEY or HERMES_API_KEY
+    if url:
+        return url, key, HERMES_MODEL, "HermesDeep"
+    return None, None, None, None
+
+
 # Ordered list of all configured providers. Used by
 # stream_chat_with_fallback() to cycle through them when one hits 429.
 def _all_providers() -> list[tuple[str, str, str, str]]:
     """Return [(url, key, model, name), ...] for every provider that has
     credentials configured, in priority order."""
     out: list[tuple[str, str, str, str]] = []
-    if GROQ_API_KEY:     out.append((GROQ_URL, GROQ_API_KEY, GROQ_MODEL, "Groq"))
     if DEEPSEEK_API_KEY: out.append((DEEPSEEK_URL, DEEPSEEK_API_KEY, DEEPSEEK_MODEL, "DeepSeek"))
+    if GROQ_API_KEY:     out.append((GROQ_URL, GROQ_API_KEY, GROQ_MODEL, "Groq"))
     if OPENAI_API_KEY:   out.append((OPENAI_URL, OPENAI_API_KEY, OPENAI_MODEL, "OpenAI"))
     if LOCAL_LLM_URL:    out.append((LOCAL_LLM_URL, LOCAL_LLM_KEY, LOCAL_LLM_MODEL, "Local"))
     if HERMES_API_KEY or HERMES_URL:

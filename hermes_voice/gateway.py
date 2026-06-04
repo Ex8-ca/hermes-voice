@@ -923,6 +923,50 @@ async def _process_chat(text: str):
         response_text += token
     bridge_ms = (time.perf_counter() - bridge_start) * 1000
 
+    # Check if the primary LLM needs the full agent loop for tools/memory/skills.
+    # The voice LLM is instructed to output [[DEEP_QUERY]] when it needs more.
+    deep_llm = None
+    if "[[DEEP_QUERY]]" in response_text:
+        logger.info("Chat endpoint: primary LLM requested deep query")
+        from llm import pick_deep_llm
+        deep_llm = pick_deep_llm()
+        if deep_llm and deep_llm[0]:
+            logger.info(f"Chat endpoint: routing to deep provider: {deep_llm[3]}")
+            # Re-call the LLM with the same messages, but on the deep provider
+            deep_start = time.perf_counter()
+            deep_response = ""
+            # Use httpx directly to hit the deep endpoint (avoids changing the global
+            # picked provider and keeps voice_primary state clean).
+            import httpx
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(
+                        deep_llm[0],
+                        json={
+                            "model": deep_llm[2] or "MiniMax-M3",
+                            "messages": messages,
+                            "max_tokens": max_tok * 3,
+                        },
+                        headers={"Authorization": f"Bearer {deep_llm[1]}"},
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                    deep_response = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+            except Exception as e:
+                logger.error(f"Chat endpoint: deep query failed: {e}")
+                deep_response = ""
+            bridge_ms += (time.perf_counter() - deep_start) * 1000
+            if deep_response.strip():
+                response_text = deep_response.strip()
+                logger.info(f"Chat endpoint: deep response ({len(response_text)} chars)")
+            else:
+                response_text = "I wasn't able to look that up right now."
+        else:
+            logger.warning("Chat endpoint: [[DEEP_QUERY]] requested but no deep LLM configured")
+            response_text = response_text.replace("[[DEEP_QUERY]]", "").strip()
+            if not response_text:
+                response_text = "I need to check something but the deep connection isn't set up."
+
     # Step 1.5: Tool dispatch (chat endpoint) — silently runs tools and feeds
     # the result back to the LLM. The final response_text has the cleaned answer.
     async def _chat_on_tool_result(name: str, tool_text: str) -> None:
