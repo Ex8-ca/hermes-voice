@@ -916,6 +916,56 @@ async def _process_chat(text: str):
     max_tok = 100  # voice responses are short
 
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
+    goto_tts = False
+
+    # Pre-LLM hook: detect memory/tool/web queries and route directly to deep path.
+    # This is more reliable than relying on the primary LLM to output [[DEEP_QUERY]].
+    _DEEP_KEYWORDS = {"remember", "last time", "earlier", "memory", "memories", "logs",
+                      "web search", "search", "tool", "skill", "check context", "what did we",
+                      "previous talk", "prior conversation"}
+    needs_deep = any(k in text.lower() for k in _DEEP_KEYWORDS)
+
+    if needs_deep:
+        from llm import pick_deep_llm
+        deep_llm = pick_deep_llm()
+        if deep_llm and deep_llm[0]:
+            logger.info(f"Chat endpoint: pre-LLM deep query trigger (matched keywords)")
+            logger.info(f"Chat endpoint: routing to deep provider: {deep_llm[3]}")
+            deep_start = time.perf_counter()
+            deep_response = ""
+            import httpx
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(
+                        deep_llm[0],
+                        json={
+                            "model": deep_llm[2] or "MiniMax-M3",
+                            "messages": [{"role": "system", "content": system_prompt},
+                                         {"role": "user", "content": text}],
+                            "max_tokens": max_tok * 3,
+                        },
+                        headers={"Authorization": f"Bearer {deep_llm[1]}"},
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                    deep_response = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+            except Exception as e:
+                logger.error(f"Chat endpoint: deep query failed: {e}")
+                deep_response = ""
+            bridge_ms = (time.perf_counter() - deep_start) * 1000
+            if deep_response.strip():
+                response_text = deep_response.strip()
+                logger.info(f"Chat endpoint: deep response ({len(response_text)} chars)")
+            else:
+                response_text = "I wasn't able to look that up right now."
+            # Skip primary LLM and go straight to persistence + TTS
+            messages = []  # No primary messages to save
+            goto_tts = True
+        else:
+            logger.warning("Chat endpoint: deep query triggered but no deep LLM configured")
+
+    if not locals().get('goto_tts'):
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
 
     # Collect the full streamed response
     response_text = ""
