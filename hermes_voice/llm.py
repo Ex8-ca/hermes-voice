@@ -28,7 +28,7 @@ logger = logging.getLogger("hermes-voice.llm")
 # DeepSeek — high quality, pay-per-token, ~500ms first token
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_URL = os.getenv("DEEPSEEK_URL", "https://api.deepseek.com/v1/chat/completions")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 # Groq — fastest, has free tier, ~150ms first token
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
